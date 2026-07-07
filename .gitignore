@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# frontend build tooling / artifacts (rebuilt by hatch_build.py)
+frontend/node_modules/
+frontend/dist/
+databoarder/static/
+
+# run/log output
+runs/
+databoarder/runs/
+databoarder/data/
+
+# packaging
+*.egg-info/
+dist/
+build/

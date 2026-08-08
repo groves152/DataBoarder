@@ -42,10 +42,12 @@ def stream(proc: subprocess.Popen, prefix: str, on_line=None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="DataBoarder dev server")
-    parser.add_argument("--port", type=int, default=8765, help="Python backend port")
+    parser.add_argument("--port", type=int, default=4000, help="Python backend port")
     parser.add_argument("--logfile", type=str, default=None,
                         help="SQLite DB to load/persist (e.g. logs/run/dashboard.db)")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-reload", action="store_true",
+                        help="Disable backend autoreload (plain uvicorn, no --reload)")
     args = parser.parse_args()
 
     backend_port = free_port(args.port)
@@ -67,20 +69,29 @@ def main() -> None:
     signal.signal(signal.SIGTERM, shutdown)
 
     # --- Python backend ---
-    logfile_arg = f', logfile="{args.logfile}"' if args.logfile else ""
+    # Runs via `uvicorn --reload` against databoarder.dev_server:app (a plain
+    # importable ASGI app, not writer.py's thread-based DataBoarder.start())
+    # so backend code changes pick up automatically without manually
+    # restarting this script. Config crosses the reload-subprocess boundary
+    # via env vars since --reload re-imports the module fresh each time.
+    backend_env = os.environ.copy()
+    backend_env["DATABOARDER_LOGFILE"] = args.logfile or ""
+    backend_cmd = [
+        sys.executable, "-m", "uvicorn",
+        "databoarder.dev_server:app",
+        "--host", "127.0.0.1",
+        "--port", str(backend_port),
+        "--log-level", "warning",
+    ]
+    if not args.no_reload:
+        backend_cmd += [
+            "--reload",
+            "--reload-dir", str(Path(__file__).parent / "databoarder"),
+        ]
     backend = subprocess.Popen(
-        [
-            sys.executable, "-c",
-            f"""
-import time
-from databoarder import DataBoarder
-w = DataBoarder(port={backend_port}, auto_open=False{logfile_arg})
-w.start()
-print("DataBoarder backend  →  http://localhost:{backend_port}", flush=True)
-while True:
-    time.sleep(1)
-""",
-        ],
+        backend_cmd,
+        cwd=Path(__file__).parent,
+        env=backend_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -88,6 +99,8 @@ while True:
     )
     procs.append(backend)
     threading.Thread(target=stream, args=(backend, "[backend]"), daemon=True).start()
+    print(f"[dev] DataBoarder backend  →  http://localhost:{backend_port}"
+          f"{'  (autoreload on)' if not args.no_reload else ''}", flush=True)
 
     # Give the backend a moment to bind before Vite starts proxying
     time.sleep(1.5)

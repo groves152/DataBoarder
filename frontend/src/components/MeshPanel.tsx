@@ -1,4 +1,4 @@
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls, Center, GizmoHelper, GizmoViewport } from "@react-three/drei";
 import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import * as THREE from "three";
@@ -8,6 +8,45 @@ import type { MeshData } from "@/types";
 interface Props { run: string; tag: string }
 
 const MAX_OVERLAY = 20;
+
+// Camera used to be a fixed `position={[0, 6, 4]}` regardless of mesh
+// scale -- fine for small content, way too close for a 60mm-long billet
+// (looked "reset very close" every time a panel opened). Instead, frame
+// the camera once per distinct (run, tag) source based on the actual
+// vertex bounding radius, and leave it alone afterward so scrubbing/
+// playback doesn't jitter the view every frame.
+function AutoFitCamera({ run, tag, frame }: { run: string; tag: string; frame?: MeshData }) {
+  const { camera } = useThree();
+  const controls = useThree((s) => s.controls) as { target: THREE.Vector3; update: () => void } | null;
+  const firedForKey = useRef<string | null>(null);
+
+  useEffect(() => {
+    const key = `${run}::${tag}`;
+    if (!frame || firedForKey.current === key) return;
+    firedForKey.current = key;
+
+    let maxDist = 1;
+    for (const v of frame.vertices) {
+      const d = Math.hypot(v[0], v[1], v[2]);
+      if (d > maxDist) maxDist = d;
+    }
+    const dist = maxDist * 2.5;
+
+    camera.position.set(dist * 0.55, dist * 0.65, dist * 0.55);
+    camera.near = Math.max(dist * 0.01, 0.01);
+    camera.far = dist * 20;
+    camera.lookAt(0, 0, 0);
+    if ("updateProjectionMatrix" in camera) {
+      (camera as THREE.PerspectiveCamera).updateProjectionMatrix();
+    }
+    if (controls) {
+      controls.target.set(0, 0, 0);
+      controls.update();
+    }
+  }, [run, tag, frame, camera, controls]);
+
+  return null;
+}
 
 // ── Geometry ──────────────────────────────────────────────────────────────────
 
@@ -158,6 +197,7 @@ export function MeshPanel({ run, tag }: Props) {
           <ambientLight intensity={0.4} />
           <directionalLight position={[5, 8, 5]} intensity={1.2} castShadow />
           <directionalLight position={[-5, -3, -5]} intensity={0.3} />
+          <AutoFitCamera run={run} tag={tag} frame={currentFrame} />
 
           {overlayAll ? (
             // No <Center> in overlay — frames sit in their natural coordinate

@@ -13,12 +13,19 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from databoarder.buffer import DataBuffer
+from databoarder.converters import to_numpy
+from databoarder.pipeline import Graph, PipelineRegistry, cook
 from databoarder.plugins import PluginRegistry
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(buffer: DataBuffer, plugins: PluginRegistry) -> FastAPI:
+def create_app(
+    buffer: DataBuffer,
+    plugins: PluginRegistry,
+    pipeline_registry: PipelineRegistry | None = None,
+) -> FastAPI:
+    pipeline_registry = pipeline_registry if pipeline_registry is not None else PipelineRegistry()
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         buffer.set_event_loop(asyncio.get_event_loop())
@@ -55,6 +62,39 @@ def create_app(buffer: DataBuffer, plugins: PluginRegistry) -> FastAPI:
         for body in entries:
             buffer.push(body.get("run", "default"), body["tag"], body["type"], body["data"])
         return JSONResponse({"ok": True, "count": len(entries)})
+
+    # ------------------------------------------------------------------
+    # Pipeline control plane — cook a node graph, push resulting mesh
+    # previews through the existing telemetry buffer/WS path so they show
+    # up in the existing MeshPanel with zero frontend changes.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/pipeline/node_kinds")
+    async def get_node_kinds() -> JSONResponse:
+        return JSONResponse({"kinds": pipeline_registry.schema()})
+
+    @app.post("/api/pipeline/{tag}/cook")
+    async def cook_pipeline(tag: str, request: Request) -> JSONResponse:
+        body = await request.json()
+        run = body.get("run", "default")
+        try:
+            graph = Graph.from_json(body["graph"])
+            result = cook(graph, pipeline_registry)
+        except (KeyError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+        for node_id, (vertices, faces) in result.meshes.items():
+            buffer.push(run, f"{tag}/{node_id}", "mesh", {
+                "step": 0,
+                "vertices": to_numpy(vertices).tolist(),
+                "faces": to_numpy(faces).tolist(),
+            })
+
+        return JSONResponse({
+            "ok": True,
+            "node_ids": list(result.values.keys()),
+            "mesh_node_ids": list(result.meshes.keys()),
+        })
 
     # ------------------------------------------------------------------
     # WebSocket hub

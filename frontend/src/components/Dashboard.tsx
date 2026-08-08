@@ -195,7 +195,7 @@ export function Dashboard() {
   const activePanels = panels.filter((p) => p.sources.some((s) => s.run === activeRun));
 
   return (
-    <div className="flex flex-col h-screen bg-surface text-white overflow-hidden">
+    <div className="flex flex-col h-full bg-surface text-white overflow-hidden">
       <RunTabs onRefresh={() => refreshRun(activeRun)} />
 
       {/* Merge hint banner */}

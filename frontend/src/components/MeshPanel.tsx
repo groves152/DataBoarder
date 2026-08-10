@@ -1,11 +1,11 @@
 import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls, Center, GizmoHelper, GizmoViewport } from "@react-three/drei";
-import { useMemo, useState, useEffect, useRef, useCallback } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback, type ReactNode } from "react";
 import * as THREE from "three";
 import { useTagData } from "@/hooks/useTagData";
 import type { MeshData } from "@/types";
 
-interface Props { run: string; tag: string }
+interface Props { run: string; tag: string; overlay?: ReactNode }
 
 const MAX_OVERLAY = 20;
 
@@ -110,7 +110,7 @@ function sampleFrames(frames: MeshData[], n: number): MeshData[] {
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
-export function MeshPanel({ run, tag }: Props) {
+export function MeshPanel({ run, tag, overlay }: Props) {
   const entries = useTagData(run, tag);
 
   const frames = useMemo(
@@ -179,19 +179,17 @@ export function MeshPanel({ run, tag }: Props) {
   };
 
   const overlayFrames = useMemo(() => sampleFrames(frames, MAX_OVERLAY), [frames]);
-
-  if (frames.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full text-gray-400 text-sm">
-        No mesh data yet
-      </div>
-    );
-  }
+  const hasMesh = frames.length > 0;
 
   return (
     <div className="flex flex-col h-full bg-surface">
       {/* 3-D viewport */}
-      <div className="flex-1 min-h-0">
+      <div className="flex-1 min-h-0 relative">
+        {!hasMesh && (
+          <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm pointer-events-none z-10">
+            No mesh data yet{overlay ? " — showing press preview" : ""}
+          </div>
+        )}
         <Canvas camera={{ position: [0, 6, 4], fov: 45 }} shadows gl={{ antialias: true }}>
           <color attach="background" args={["#0f1117"]} />
           <ambientLight intensity={0.4} />
@@ -202,26 +200,36 @@ export function MeshPanel({ run, tag }: Props) {
           {overlayAll ? (
             // No <Center> in overlay — frames sit in their natural coordinate
             // space so the fixed anvil end stays aligned across all frames.
-            overlayFrames.map((f, i) => (
-              <MeshGeometry
-                key={f.step}
-                data={f}
-                color={frameColor(i, overlayFrames.length)}
-                opacity={frameOpacity(i, overlayFrames.length)}
-                transparent
-              />
-            ))
-          ) : (
-            currentFrame && (
-              <Center>
+            // Press preview (if any) uses the same raw/uncentered frame here.
+            <>
+              {overlayFrames.map((f, i) => (
                 <MeshGeometry
-                  data={currentFrame}
-                  color="#7c6af7"
-                  opacity={1}
-                  transparent={false}
+                  key={f.step}
+                  data={f}
+                  color={frameColor(i, overlayFrames.length)}
+                  opacity={frameOpacity(i, overlayFrames.length)}
+                  transparent
                 />
-              </Center>
-            )
+              ))}
+              {overlay}
+            </>
+          ) : currentFrame ? (
+            // Press preview rendered INSIDE the same <Center> as the mesh so
+            // it shifts together with it, not just in raw/uncentered space.
+            <Center>
+              <MeshGeometry
+                data={currentFrame}
+                color="#7c6af7"
+                opacity={1}
+                transparent={false}
+              />
+              {overlay}
+            </Center>
+          ) : (
+            // No cooked mesh yet -- still show the preview (uncentered; no
+            // billet to reference for centering yet) so a freshly-added,
+            // not-yet-cooked node can still be positioned by eye.
+            overlay
           )}
 
           <OrbitControls makeDefault />

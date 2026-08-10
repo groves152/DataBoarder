@@ -60,8 +60,23 @@ class DataBuffer:
     # Public API
     # ------------------------------------------------------------------
 
-    def push(self, run: str, tag: str, dtype: str, payload: dict[str, Any]) -> None:
+    def push(self, run: str, tag: str, dtype: str, payload: dict[str, Any], replace: bool = False) -> None:
+        """`replace=True` clears any existing entries for this (run, tag)
+        first, in memory AND in the SQLite backing store (if any) -- for a
+        producer where a tag holds a single CURRENT value (e.g. a pipeline
+        node's latest cooked mesh) rather than an accumulating history log
+        (the default, used by scalar/histogram/image telemetry and
+        anything else meant to be scrubbed/played back as real frames).
+        Without this, re-cooking the same node id repeatedly (e.g. on every
+        param edit) piles up one stale mesh per cook under the same tag
+        forever, which a naive "show every entry ever logged" viewer would
+        wrongly render as an animation of the node's edit history instead
+        of its current state."""
         with self._lock:
+            if replace:
+                self._store.get(run, {}).get(tag, deque()).clear()
+                if self._conn is not None:
+                    self._conn.execute("DELETE FROM entries WHERE run = ? AND tag = ?", (run, tag))
             self._push_memory(run, tag, dtype, payload)
             if self._conn is not None:
                 self._conn.execute(

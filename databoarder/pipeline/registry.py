@@ -14,21 +14,36 @@ from typing import Any, Callable, Literal
 
 NodeHandler = Callable[..., Any]
 MeshExporter = Callable[[Any], tuple[Any, Any]]  # value -> (vertices, faces)
+# Given a node's own output value and its resolved params, returns an
+# arbitrary JSON-safe dict of extra info about that cook -- e.g. "here's
+# what was actually achieved vs. what was requested." Domain-agnostic:
+# `cook()` just collects and forwards whatever's returned, never inspects it.
+Diagnostics = Callable[[Any, dict[str, Any]], dict[str, Any]]
 
 
 @dataclass
 class ParamSpec:
     """Describes one editable node parameter -- enough for a generic
-    frontend to render the right control (slider, dropdown, ...) with
-    sensible bounds, without hardcoding any domain-specific knowledge."""
+    frontend to render the right control (slider, dropdown, checkbox...)
+    with sensible bounds, without hardcoding any domain-specific knowledge."""
 
-    type: Literal["float", "int", "select"]
+    type: Literal["float", "int", "select", "bool"]
     default: Any
     min: float | None = None
     max: float | None = None
     step: float | None = None
     options: list[str] | None = None  # for type == "select"
     label: str | None = None
+    # Hover/tooltip text -- e.g. explaining what a toggle actually does
+    # physically, not just its name.
+    description: str | None = None
+    # Arbitrary per-option metadata (only meaningful for type == "select"),
+    # e.g. {"real_flat_die": {"shape": "box", "half_width": 6.7, ...}}.
+    # DataBoarder itself never looks inside these dicts -- purely a
+    # pass-through so a domain package (like forge_genie's press-geometry
+    # dimensions) can attach display hints to select options without this
+    # module knowing what any of the keys mean.
+    options_meta: dict[str, dict[str, Any]] | None = None
 
     def to_json(self) -> dict[str, Any]:
         d: dict[str, Any] = {"type": self.type, "default": self.default}
@@ -42,6 +57,10 @@ class ParamSpec:
             d["options"] = self.options
         if self.label is not None:
             d["label"] = self.label
+        if self.description is not None:
+            d["description"] = self.description
+        if self.options_meta is not None:
+            d["options_meta"] = self.options_meta
         return d
 
 
@@ -59,6 +78,10 @@ class NodeSpec:
     to_mesh: MeshExporter | None = None
     # Editable params, name -> spec. Drives the frontend's node inspector.
     params: dict[str, ParamSpec] = field(default_factory=dict)
+    # Optional: extra per-cook info about this node's output (e.g. "was
+    # this param's request capped by a physical limit"), surfaced to the
+    # frontend in the cook response.
+    diagnostics: Diagnostics | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -79,9 +102,11 @@ class PipelineRegistry:
         inputs: tuple[str, ...] = (),
         to_mesh: MeshExporter | None = None,
         params: dict[str, ParamSpec] | None = None,
+        diagnostics: Diagnostics | None = None,
     ) -> None:
         self._nodes[kind] = NodeSpec(
-            kind=kind, handler=handler, inputs=inputs, to_mesh=to_mesh, params=params or {}
+            kind=kind, handler=handler, inputs=inputs, to_mesh=to_mesh, params=params or {},
+            diagnostics=diagnostics,
         )
 
     def get(self, kind: str) -> NodeSpec | None:

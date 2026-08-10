@@ -16,6 +16,7 @@ from databoarder.pipeline.registry import PipelineRegistry
 class CookResult:
     values: dict[str, Any] = field(default_factory=dict)
     meshes: dict[str, tuple[Any, Any]] = field(default_factory=dict)
+    diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def cook(graph: Graph, registry: PipelineRegistry) -> CookResult:
@@ -48,5 +49,8 @@ def cook(graph: Graph, registry: PipelineRegistry) -> CookResult:
 
         if spec.to_mesh is not None:
             result.meshes[node_id] = spec.to_mesh(result.values[node_id])
+
+        if spec.diagnostics is not None:
+            result.diagnostics[node_id] = spec.diagnostics(result.values[node_id], node.params)
 
     return result

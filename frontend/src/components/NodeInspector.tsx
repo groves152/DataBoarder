@@ -1,58 +1,8 @@
 import { usePipelineStore } from "@/stores/pipelineStore";
-import type { ParamSpec } from "@/types/pipeline";
-
-function ParamControl({
-  name, spec, value, onChange,
-}: {
-  name: string;
-  spec: ParamSpec;
-  value: number | string;
-  onChange: (v: number | string) => void;
-}) {
-  const label = spec.label ?? name;
-
-  if (spec.type === "select") {
-    return (
-      <label className="flex flex-col gap-1 text-xs text-gray-400">
-        <span>{label}</span>
-        <select
-          value={String(value)}
-          onChange={(e) => onChange(e.target.value)}
-          className="bg-surface border border-border rounded px-2 py-1 text-gray-200"
-        >
-          {(spec.options ?? []).map((opt) => (
-            <option key={opt} value={opt}>{opt}</option>
-          ))}
-        </select>
-      </label>
-    );
-  }
-
-  const numValue = typeof value === "number" ? value : Number(value);
-  const step = spec.step ?? (spec.type === "int" ? 1 : 0.1);
-  return (
-    <label className="flex flex-col gap-1 text-xs text-gray-400">
-      <span className="flex justify-between">
-        <span>{label}</span>
-        <span className="tabular-nums text-gray-300">
-          {spec.type === "int" ? numValue : numValue.toFixed(2)}
-        </span>
-      </span>
-      <input
-        type="range"
-        min={spec.min ?? 0}
-        max={spec.max ?? 100}
-        step={step}
-        value={numValue}
-        onChange={(e) => onChange(spec.type === "int" ? parseInt(e.target.value, 10) : parseFloat(e.target.value))}
-        className="accent-accent"
-      />
-    </label>
-  );
-}
+import { ParamControl } from "./ParamControl";
 
 export function NodeInspector() {
-  const { nodes, nodeKinds, selectedNodeId, updateNodeParam, cooking, cookError } = usePipelineStore();
+  const { nodes, nodeKinds, selectedNodeId, updateNodeParam, cooking, cookError, diagnostics } = usePipelineStore();
   const node = nodes.find((n) => n.id === selectedNodeId);
 
   if (!node) {
@@ -64,6 +14,8 @@ export function NodeInspector() {
   }
 
   const schema = nodeKinds.find((k) => k.kind === node.data.kind);
+  const nodeDiag = diagnostics[node.id];
+  const capped = Boolean(nodeDiag?.capped);
 
   return (
     <div className="h-full flex flex-col bg-panel">
@@ -74,6 +26,16 @@ export function NodeInspector() {
           {node.data.cooked ? "cooked" : "stale — will cook shortly"}
         </div>
       </div>
+
+      {capped && (
+        <div className="px-3 py-2 border-b border-border bg-amber-950/40 text-[11px] text-amber-300">
+          ⚠ Limited by physical press capacity — requested{" "}
+          {typeof nodeDiag?.commanded_rho === "number" ? nodeDiag.commanded_rho.toFixed(1) : "?"}mm, achieved{" "}
+          {typeof nodeDiag?.achieved_rho === "number" ? nodeDiag.achieved_rho.toFixed(1) : "?"}mm this pass. Chain
+          another strike here for a second pass, or turn off "Physical press limit" below.
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-4">
         {schema && Object.entries(schema.params).map(([name, spec]) => (
           <ParamControl

@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from databoarder.buffer import DataBuffer
 from databoarder.converters import to_numpy
-from databoarder.pipeline import Graph, PipelineRegistry, cook
+from databoarder.pipeline import Graph, GeneratorRegistry, PipelineRegistry, cook
 from databoarder.plugins import PluginRegistry
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -24,8 +24,11 @@ def create_app(
     buffer: DataBuffer,
     plugins: PluginRegistry,
     pipeline_registry: PipelineRegistry | None = None,
+    generator_registry: GeneratorRegistry | None = None,
 ) -> FastAPI:
     pipeline_registry = pipeline_registry if pipeline_registry is not None else PipelineRegistry()
+    generator_registry = generator_registry if generator_registry is not None else GeneratorRegistry()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         buffer.set_event_loop(asyncio.get_event_loop())
@@ -84,17 +87,50 @@ def create_app(
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
         for node_id, (vertices, faces) in result.meshes.items():
-            buffer.push(run, f"{tag}/{node_id}", "mesh", {
+            node_tag = f"{tag}/{node_id}"
+            # replace=True: a node's tag holds its CURRENT cooked mesh only,
+            # not a growing log of every cook it's ever participated in
+            # (see `DataBuffer.push`'s docstring) -- otherwise editing an
+            # upstream hit and re-cooking leaves every downstream node's
+            # preview mixing stale pre-edit geometry in with the new state.
+            buffer.push(run, node_tag, "mesh", {
                 "step": 0,
                 "vertices": to_numpy(vertices).tolist(),
                 "faces": to_numpy(faces).tolist(),
-            })
+            }, replace=True)
 
         return JSONResponse({
             "ok": True,
             "node_ids": list(result.values.keys()),
             "mesh_node_ids": list(result.meshes.keys()),
+            "diagnostics": result.diagnostics,
         })
+
+    # ------------------------------------------------------------------
+    # Path generators — deterministically build a whole path (root node +
+    # linear step chain) from a handful of params in one shot, in the SAME
+    # {root, steps, metadata} shape the frontend's Import/Export path JSON
+    # uses (see `pipeline/generators.py`), so a generated path is a real
+    # example of that shared format, not a special case of it.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/pipeline/generators")
+    async def get_generators() -> JSONResponse:
+        return JSONResponse({"generators": generator_registry.schema()})
+
+    @app.post("/api/pipeline/generators/{name}")
+    async def run_generator(name: str, request: Request) -> JSONResponse:
+        spec = generator_registry.get(name)
+        if spec is None:
+            return JSONResponse({"ok": False, "error": f"unknown generator {name!r}"}, status_code=404)
+        params = await request.json() if await request.body() else {}
+        try:
+            path = spec.handler(**params)
+        except (TypeError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        path.setdefault("format", "databoarder_path/v1")
+        path.setdefault("name", name)
+        return JSONResponse({"ok": True, "path": path})
 
     # ------------------------------------------------------------------
     # WebSocket hub

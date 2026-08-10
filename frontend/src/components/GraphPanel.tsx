@@ -80,6 +80,11 @@ export function GraphPanel() {
             </button>
           </div>
         </Panel>
+        <Panel position="top-right">
+          <div className="text-[11px] px-2 py-1 rounded bg-panel border border-border text-gray-500">
+            Shift-drag to box-select, ctrl/cmd-click to multi-select — use Path ▾ to export a selection
+          </div>
+        </Panel>
         {nodes.length > 0 && edges.length === 0 && (
           <Panel position="top-center">
             <div className="text-[11px] px-2 py-1 rounded bg-panel border border-border text-gray-400">

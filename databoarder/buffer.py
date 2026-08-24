@@ -86,6 +86,23 @@ class DataBuffer:
                 self._conn.commit()
         self._broadcast(run, tag, dtype, payload)
 
+    def clear(self, run: str, tag_prefix: str | None = None) -> list[str]:
+        """Deletes every (run, tag) bucket for `run`, optionally restricted
+        to tags starting with `tag_prefix` -- both in memory and in the
+        SQLite backing store (if any). Exact per-tag DELETEs (not a SQL
+        LIKE match), so a prefix containing SQL wildcard characters (%, _)
+        can't over- or under-match. Returns the tags actually removed."""
+        with self._lock:
+            tags = list(self._store.get(run, {}).keys())
+            matching = [t for t in tags if tag_prefix is None or t.startswith(tag_prefix)]
+            for t in matching:
+                del self._store[run][t]
+                if self._conn is not None:
+                    self._conn.execute("DELETE FROM entries WHERE run = ? AND tag = ?", (run, t))
+            if self._conn is not None:
+                self._conn.commit()
+        return matching
+
     def get(self, run: str, tag: str) -> list[dict[str, Any]]:
         with self._lock:
             return list(self._store.get(run, {}).get(tag, []))

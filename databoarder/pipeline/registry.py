@@ -14,11 +14,16 @@ from typing import Any, Callable, Literal
 
 NodeHandler = Callable[..., Any]
 MeshExporter = Callable[[Any], tuple[Any, Any]]  # value -> (vertices, faces)
-# Given a node's own output value and its resolved params, returns an
-# arbitrary JSON-safe dict of extra info about that cook -- e.g. "here's
-# what was actually achieved vs. what was requested." Domain-agnostic:
-# `cook()` just collects and forwards whatever's returned, never inspects it.
-Diagnostics = Callable[[Any, dict[str, Any]], dict[str, Any]]
+# Given a node's own output value, its resolved params, its resolved
+# upstream inputs (e.g. {"state": <value BEFORE this node ran>} -- needed
+# for any diagnostic that compares before/after), and an opaque per-cook
+# `context` dict (round-tripped from the cook request body, e.g. "which
+# goal is selected in the frontend" -- same "carry it, never inspect it"
+# pattern as ParamSpec.options_meta), returns an arbitrary JSON-safe dict
+# of extra info about that cook -- e.g. "here's what was actually achieved
+# vs. what was requested." Domain-agnostic: `cook()` just collects and
+# forwards whatever's returned, never inspects it.
+Diagnostics = Callable[[Any, dict[str, Any], dict[str, Any], "dict[str, Any] | None"], dict[str, Any]]
 
 
 @dataclass

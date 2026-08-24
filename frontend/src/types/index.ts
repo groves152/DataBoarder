@@ -17,6 +17,9 @@ export interface MeshData {
   faces: number[][];
   colors?: number[][];
   normals?: number[][];
+  // Only set on a pipeline's "{tag}/__sequence__" tag -- which graph node
+  // this step's mesh came from.
+  node_id?: string;
 }
 export interface AnimationFrameData { frame_idx: number; png_b64?: string; shape: number[] }
 

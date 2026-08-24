@@ -1,33 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { usePipelineStore } from "@/stores/pipelineStore";
-import type { PathJson, GraphJson } from "@/types/pipeline";
 import { GenerateDialog } from "./GenerateDialog";
-
-function isPathJson(data: unknown): data is PathJson {
-  if (typeof data !== "object" || data === null) return false;
-  const d = data as Record<string, unknown>;
-  return (
-    typeof d.root === "object" && d.root !== null &&
-    typeof (d.root as Record<string, unknown>).kind === "string" &&
-    Array.isArray(d.steps)
-  );
-}
-
-function isGraphJson(data: unknown): data is GraphJson {
-  if (typeof data !== "object" || data === null) return false;
-  const d = data as Record<string, unknown>;
-  return Array.isArray(d.nodes) && Array.isArray(d.edges);
-}
-
-function downloadJson(data: unknown, filename: string) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+import { PasteJsonDialog } from "./PasteJsonDialog";
+import { RawJsonDialog } from "./RawJsonDialog";
+import { isPathJson, isGraphJson } from "@/utils/pathJson";
 
 // Own menu structure (separate from GraphPanel's "+ node kind" toolbar):
 // import/export as JSON, and generate a path deterministically from a
@@ -43,6 +19,8 @@ export function PathMenu() {
   const [open, setOpen] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [activeGenerator, setActiveGenerator] = useState<string | null>(null);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [rawJsonPreview, setRawJsonPreview] = useState<{ data: unknown; filename: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -63,6 +41,11 @@ export function PathMenu() {
 
   function handleImportClick() {
     fileInputRef.current?.click();
+    setOpen(false);
+  }
+
+  function handlePasteClick() {
+    setPasteOpen(true);
     setOpen(false);
   }
 
@@ -94,7 +77,7 @@ export function PathMenu() {
       return;
     }
     setExportError(null);
-    downloadJson(path, `${tag || "path"}.json`);
+    setRawJsonPreview({ data: path, filename: `${tag || "path"}.json` });
     setOpen(false);
   }
 
@@ -106,7 +89,7 @@ export function PathMenu() {
       return;
     }
     setExportError(null);
-    downloadJson(graph, `${tag || "graph"}${onlySelected ? "_selection" : ""}.json`);
+    setRawJsonPreview({ data: graph, filename: `${tag || "graph"}${onlySelected ? "_selection" : ""}.json` });
     setOpen(false);
   }
 
@@ -128,7 +111,13 @@ export function PathMenu() {
             onClick={handleImportClick}
             className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-white"
           >
-            Import (path or graph JSON)…
+            Import file (path or graph JSON)…
+          </button>
+          <button
+            onClick={handlePasteClick}
+            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-white"
+          >
+            Paste JSON…
           </button>
           <div className="border-t border-border my-1" />
           <button
@@ -183,6 +172,16 @@ export function PathMenu() {
 
       {activeSchema && (
         <GenerateDialog schema={activeSchema} onClose={() => setActiveGenerator(null)} />
+      )}
+
+      {pasteOpen && <PasteJsonDialog onClose={() => setPasteOpen(false)} />}
+
+      {rawJsonPreview && (
+        <RawJsonDialog
+          data={rawJsonPreview.data}
+          filename={rawJsonPreview.filename}
+          onClose={() => setRawJsonPreview(null)}
+        />
       )}
     </div>
   );

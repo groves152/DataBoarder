@@ -5,7 +5,26 @@ import * as THREE from "three";
 import { useTagData } from "@/hooks/useTagData";
 import type { MeshData } from "@/types";
 
-interface Props { run: string; tag: string; overlay?: ReactNode }
+interface Props {
+  run: string;
+  tag: string;
+  overlay?: ReactNode;
+  // One-way "here's what step I'm currently showing" callback -- fired
+  // whenever the displayed frame changes (scrub, play, or auto-advance).
+  // MeshPanel stays the sole owner of playback state (no controlled-mode
+  // props, so every OTHER existing usage of this component is completely
+  // unaffected); a consumer that wants to sync its OWN display to
+  // whatever MeshPanel is currently showing (e.g. a synced action/reward
+  // trend chart) just observes this instead.
+  onFrameChange?: (step: number) => void;
+  // Overrides the PRIMARY mesh's opacity in single-frame mode (default
+  // fully opaque). Cosmetic-only, sourced from a node's own "opacity"
+  // param when it has one (currently just slab_stock) -- lets the caller
+  // see through the billet without touching the simulation. Doesn't
+  // affect overlay-all (ghosted multi-frame) mode, which already computes
+  // its own per-frame opacity gradient for that view.
+  meshOpacity?: number;
+}
 
 const MAX_OVERLAY = 20;
 
@@ -50,14 +69,14 @@ function AutoFitCamera({ run, tag, frame }: { run: string; tag: string; frame?: 
 
 // ── Geometry ──────────────────────────────────────────────────────────────────
 
-interface GeoProps {
+export interface GeoProps {
   data: MeshData;
   color: string;
   opacity: number;
   transparent: boolean;
 }
 
-function MeshGeometry({ data, color, opacity, transparent }: GeoProps) {
+export function MeshGeometry({ data, color, opacity, transparent }: GeoProps) {
   const geometry = useMemo(() => {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute(
@@ -110,17 +129,27 @@ function sampleFrames(frames: MeshData[], n: number): MeshData[] {
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
-export function MeshPanel({ run, tag, overlay }: Props) {
+export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1 }: Props) {
   const entries = useTagData(run, tag);
 
-  const frames = useMemo(
-    () =>
-      entries
-        .filter((e) => e.type === "mesh")
-        .map((e) => e.data as MeshData)
-        .sort((a, b) => a.step - b.step),
-    [entries],
-  );
+  // Dedupe by step, keeping the LAST occurrence -- a `replace=True` push
+  // (e.g. re-cooking the same node/sequence tag) clears the server's
+  // buffer, but the WebSocket broadcast for that push carries no "this
+  // replaced everything" signal, so the frontend's own accumulated
+  // `entries` cache just keeps growing with duplicate steps across
+  // re-cooks. Array.sort is stable, so without this, `frames.findIndex`
+  // below would always resolve to the OLDEST entry for a repeated step --
+  // i.e. the displayed mesh would silently freeze on the first cook
+  // instead of updating on subsequent ones.
+  const frames = useMemo(() => {
+    const byStep = new Map<number, MeshData>();
+    for (const e of entries) {
+      if (e.type !== "mesh") continue;
+      const d = e.data as MeshData;
+      byStep.set(d.step, d);
+    }
+    return Array.from(byStep.values()).sort((a, b) => a.step - b.step);
+  }, [entries]);
 
   // Track by STEP NUMBER so new arrivals don't reshuffle the index
   const [currentStep, setCurrentStep] = useState<number>(-1);
@@ -138,6 +167,10 @@ export function MeshPanel({ run, tag, overlay }: Props) {
   }, [frames, currentStep]);
 
   const currentFrame = frameIdx >= 0 ? frames[frameIdx] : undefined;
+
+  useEffect(() => {
+    if (currentFrame) onFrameChange?.(currentFrame.step);
+  }, [currentFrame, onFrameChange]);
 
   // Auto-advance to latest ONLY when not playing and not scrubbing
   useEffect(() => {
@@ -220,8 +253,8 @@ export function MeshPanel({ run, tag, overlay }: Props) {
               <MeshGeometry
                 data={currentFrame}
                 color="#7c6af7"
-                opacity={1}
-                transparent={false}
+                opacity={meshOpacity}
+                transparent={meshOpacity < 1}
               />
               {overlay}
             </Center>

@@ -80,9 +80,10 @@ def create_app(
     async def cook_pipeline(tag: str, request: Request) -> JSONResponse:
         body = await request.json()
         run = body.get("run", "default")
+        context = body.get("context")  # opaque, optional -- see registry.Diagnostics
         try:
             graph = Graph.from_json(body["graph"])
-            result = cook(graph, pipeline_registry)
+            result = cook(graph, pipeline_registry, context=context)
         except (KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
@@ -99,12 +100,42 @@ def create_app(
                 "faces": to_numpy(faces).tolist(),
             }, replace=True)
 
+        # Also push a step-indexed running history of every mesh-producing
+        # node in topological order, under one dedicated tag -- lets a
+        # frontend "play the whole cooked sequence" view scrub/play through
+        # ALL the hits with MeshPanel's existing frame mechanism, instead of
+        # re-selecting a different node's single-mesh tag every tick (which
+        # forces a remount + fresh fetch + camera re-fit per hit -- the
+        # direct cause of "flashing back to stock/unrelated hits" during
+        # playback). replace=True only on the FIRST push of this cook
+        # clears the previous cook's sequence exactly once; the rest append.
+        seq_tag = f"{tag}/__sequence__"
+        mesh_order = [node_id for node_id in result.order if node_id in result.meshes]
+        for i, node_id in enumerate(mesh_order):
+            vertices, faces = result.meshes[node_id]
+            buffer.push(run, seq_tag, "mesh", {
+                "step": i,
+                "node_id": node_id,
+                "vertices": to_numpy(vertices).tolist(),
+                "faces": to_numpy(faces).tolist(),
+            }, replace=(i == 0))
+
         return JSONResponse({
             "ok": True,
             "node_ids": list(result.values.keys()),
             "mesh_node_ids": list(result.meshes.keys()),
             "diagnostics": result.diagnostics,
         })
+
+    @app.delete("/api/pipeline/{tag}/cache")
+    async def clear_pipeline_cache(tag: str, run: str = "default") -> JSONResponse:
+        # Scoped to "{tag}/" -- sweeps every per-node mesh tag AND the
+        # "{tag}/__sequence__" tag above for free (same prefix), but can
+        # never touch the target-mesh library (a separate run="_targets"
+        # namespace entirely, see ui_nodes/targets.py), so "clear cache"
+        # never risks nuking shared reference goal meshes.
+        removed = buffer.clear(run, tag_prefix=f"{tag}/")
+        return JSONResponse({"ok": True, "removed_tags": removed})
 
     # ------------------------------------------------------------------
     # Path generators — deterministically build a whole path (root node +

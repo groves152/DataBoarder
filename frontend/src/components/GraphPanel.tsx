@@ -11,7 +11,7 @@ const nodeTypes = { pipelineNode: PipelineGraphNode };
 export function GraphPanel() {
   const {
     nodeKinds, nodes, edges, selectedNodeId,
-    fetchNodeKinds, addNode, deleteNode, selectNode, resetGraph,
+    fetchNodeKinds, addNode, deleteNode, selectNode, resetGraph, clearCache,
     onNodesChange, onEdgesChange, onConnect,
   } = usePipelineStore();
 
@@ -77,6 +77,18 @@ export function GraphPanel() {
               className="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-400 hover:border-accent hover:text-white transition-colors"
             >
               ↺ Reset
+            </button>
+            <button
+              onClick={() => {
+                if (window.confirm(
+                  "Delete all nodes AND permanently release their cooked mesh data on the server " +
+                  "(including SQLite history, if logging is enabled)? This can't be undone.",
+                )) clearCache();
+              }}
+              title="Delete all nodes and purge their cooked meshes from the server buffer"
+              className="text-xs px-2 py-1 rounded bg-surface border border-border text-red-400 hover:border-red-400 transition-colors"
+            >
+              🗑 Clear cache
             </button>
           </div>
         </Panel>

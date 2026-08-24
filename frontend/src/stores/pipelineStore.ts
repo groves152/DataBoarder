@@ -16,6 +16,12 @@ import type {
 
 const AUTO_COOK_DEBOUNCE_MS = 500;
 
+// Must match forge_search.ui_nodes.targets.TARGETS_RUN/TARGETS_TAG_PREFIX.
+// Exported so components building a goal mesh's (run, tag) pair (e.g.
+// GoalOverlay via PipelineView) share this one definition.
+export const TARGETS_RUN = "_targets";
+export const TARGETS_TAG_PREFIX = "targets/";
+
 let nodeIdCounter = 0;
 function nextNodeId(kind: string): string {
   nodeIdCounter += 1;
@@ -28,6 +34,14 @@ function nextNodeId(kind: string): string {
 const DEFAULT_TARGET_INPUT = "state";
 
 let autoCookTimer: ReturnType<typeof setTimeout> | null = null;
+// Guards against an out-of-order network response: e.g. an auto-cook from
+// a prior param edit is still in flight when the user immediately triggers
+// a second cook (picking a goal calls cook() right away, see setGoalName)
+// -- if the FIRST (now-stale) response happened to arrive AFTER the
+// second, it would silently overwrite the fresh diagnostics with the old,
+// goal-less ones. Each cook() call claims the next id; a response is only
+// applied if its id still matches the most recent call when it resolves.
+let cookRequestId = 0;
 
 interface PipelineStore {
   nodeKinds: NodeKindSchema[];
@@ -41,6 +55,45 @@ interface PipelineStore {
   cookError: string | null;
   // node id -> extra info from its last cook (e.g. "was a param capped").
   diagnostics: Record<string, NodeDiagnostics>;
+  // Whether the viewport shows the whole cooked chain's step-indexed
+  // "{tag}/__sequence__" history (scrub/play via MeshPanel's own frame
+  // mechanism) instead of the currently-selected node's single mesh.
+  viewSequence: boolean;
+
+  // Target/goal mesh overlay -- selection lives here (not local component
+  // state) because Feature 3's reward diagnostics also need to know which
+  // goal is selected, via `cook()`'s `context` payload below.
+  goalName: string | null;
+  goalVisible: boolean;
+  goalOpacity: number;
+  availableGoals: string[];
+
+  // Billet opacity -- global, applies to whichever mesh is currently
+  // shown regardless of which node is selected/playing (unlike an
+  // earlier version that lived as a per-slab_stock-node param: that
+  // reset to fully opaque the moment you selected a DIFFERENT node,
+  // since only the stock kind had the param at all). Same "lives outside
+  // any one node, applies everywhere" pattern as goalOpacity above.
+  billetOpacity: number;
+
+  // Whether to render the press-die overlay for the selected strike node.
+  // Lives here (not local component state) now that it's controlled from
+  // ViewportSidebar rather than PipelineView directly.
+  showPressPreview: boolean;
+
+  // Default `tool` value for NEWLY created nodes only -- deliberately NOT
+  // retroactive (unlike forceCorrectClosure below), matching the ask to
+  // set a default while still letting any individual node override it via
+  // its own NodeInspector param. null until fetchNodeKinds resolves and
+  // seeds it from whichever node kind's schema has a "tool" param.
+  defaultTool: string | null;
+
+  // Physical press limit -- GLOBAL, unlike defaultTool: toggling this
+  // rewrites every existing node's own "force_correct_closure" param (not
+  // just future ones), matching the ask that ON caps every action's
+  // achievable closure and OFF allows arbitrary closures everywhere, with
+  // no per-node override left in NodeInspector.
+  forceCorrectClosure: boolean;
 
   setRun: (run: string) => void;
   setTag: (tag: string) => void;
@@ -50,6 +103,16 @@ interface PipelineStore {
   deleteNode: (id: string) => void;
   selectNode: (id: string | null) => void;
   updateNodeParam: (id: string, paramName: string, value: ParamValue) => void;
+  setViewSequence: (v: boolean) => void;
+
+  setGoalName: (name: string | null) => void;
+  setGoalVisible: (v: boolean) => void;
+  setGoalOpacity: (v: number) => void;
+  fetchAvailableGoals: () => Promise<void>;
+  setBilletOpacity: (v: number) => void;
+  setShowPressPreview: (v: boolean) => void;
+  setDefaultTool: (v: string) => void;
+  setForceCorrectClosure: (v: boolean) => void;
 
   onNodesChange: OnNodesChange<Node<PipelineNodeData>>;
   onEdgesChange: OnEdgesChange;
@@ -58,6 +121,11 @@ interface PipelineStore {
   cook: () => Promise<void>;
   scheduleAutoCook: () => void;
   resetGraph: () => void;
+  // Clears BOTH the local graph (nodes/edges/selection, via resetGraph)
+  // AND the server's cooked-mesh buffer for this run/tag prefix -- unlike
+  // resetGraph alone, which only ever touched local state (see its own
+  // docstring), this actually releases cooked mesh data server-side.
+  clearCache: () => Promise<void>;
 
   // Replaces the whole graph with a root node + linear step chain built
   // from a path JSON (import, or a just-generated path) and cooks it.
@@ -95,14 +163,76 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   cooking: false,
   cookError: null,
   diagnostics: {},
+  viewSequence: false,
+
+  goalName: null,
+  goalVisible: true,
+  goalOpacity: 0.35,
+  billetOpacity: 1.0,
+  availableGoals: [],
+  showPressPreview: true,
+  defaultTool: null,
+  forceCorrectClosure: true,
 
   setRun: (run) => set({ run }),
   setTag: (tag) => set({ tag }),
+  setViewSequence: (v) => set({ viewSequence: v }),
+
+  setGoalName: (name) => {
+    set({ goalName: name });
+    // Reward diagnostics (if any goal-aware node kind is registered)
+    // depend on which goal is selected -- refresh immediately rather than
+    // waiting for the next unrelated debounced edit, so switching goals
+    // doesn't leave a stale reward displayed.
+    get().cook();
+  },
+  setGoalVisible: (v) => set({ goalVisible: v }),
+  setGoalOpacity: (v) => set({ goalOpacity: v }),
+  setBilletOpacity: (v) => set({ billetOpacity: v }),
+  setShowPressPreview: (v) => set({ showPressPreview: v }),
+  setDefaultTool: (v) => set({ defaultTool: v }),
+
+  // Rewrites EVERY existing node's own "force_correct_closure" param (any
+  // kind that happens to have one, detected by presence not by hardcoding
+  // "slab_strike") to match, then re-cooks immediately -- unlike a
+  // per-node param edit, this is a global physical-capability switch, so
+  // every already-placed strike should reflect it right away, not just
+  // future ones.
+  setForceCorrectClosure: (v) => {
+    set((s) => ({
+      forceCorrectClosure: v,
+      nodes: s.nodes.map((n) =>
+        "force_correct_closure" in n.data.params
+          ? { ...n, data: { ...n.data, params: { ...n.data.params, force_correct_closure: v }, cooked: false } }
+          : n,
+      ),
+    }));
+    get().cook();
+  },
+
+  fetchAvailableGoals: async () => {
+    const res = await fetch(`/api/tags?run=${encodeURIComponent(TARGETS_RUN)}`);
+    const data: { tags: string[] } = await res.json();
+    set({
+      availableGoals: data.tags
+        .filter((t) => t.startsWith(TARGETS_TAG_PREFIX))
+        .map((t) => t.slice(TARGETS_TAG_PREFIX.length))
+        .sort(),
+    });
+  },
 
   fetchNodeKinds: async () => {
     const res = await fetch("/api/pipeline/node_kinds");
     const data: { kinds: NodeKindSchema[] } = await res.json();
-    set({ nodeKinds: data.kinds });
+    set((s) => {
+      // Seed defaultTool from whichever node kind's schema has a "tool"
+      // param, ONLY if nothing's been chosen yet -- a user's own pick (or
+      // a re-fetch after a server restart) should never be silently
+      // clobbered back to the schema default.
+      if (s.defaultTool !== null) return { nodeKinds: data.kinds };
+      const toolSpec = data.kinds.find((k) => k.params.tool)?.params.tool;
+      return { nodeKinds: data.kinds, defaultTool: toolSpec ? String(toolSpec.default) : null };
+    });
   },
 
   fetchGeneratorSchemas: async () => {
@@ -118,6 +248,15 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     for (const [name, spec] of Object.entries(schema.params)) {
       params[name] = spec.default;
     }
+    // Global overrides for these two specific, deliberately-named params
+    // (not "any param a global setting happens to exist for") -- avoids
+    // surprising a future node kind that reuses a param name for
+    // something unrelated. defaultTool only affects NEW nodes (existing
+    // ones keep whatever they have); forceCorrectClosure's retroactive
+    // rewrite of EXISTING nodes lives in setForceCorrectClosure instead.
+    const { defaultTool, forceCorrectClosure } = get();
+    if (defaultTool !== null && "tool" in params) params["tool"] = defaultTool;
+    if ("force_correct_closure" in params) params["force_correct_closure"] = forceCorrectClosure;
     // Every new node otherwise starts at the exact same default params --
     // fine for the first of a kind, but chaining several strike nodes
     // without hand-editing each one makes every strike land on the same
@@ -158,7 +297,14 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     get().scheduleAutoCook();
   },
 
-  selectNode: (id) => set({ selectedNodeId: id }),
+  // Selecting an ACTUAL node (not deselecting via a pane click, which
+  // passes null) exits sequence view -- otherwise the viewport silently
+  // stays pinned to "{tag}/__sequence__" after trying "▶ Sequence" once,
+  // which also suppresses the press-preview overlay (see PipelineView's
+  // previewOverlay) with no obvious indicator why. Matches the original
+  // pre-sequence-view behavior: clicking a node always shows THAT node's
+  // own state.
+  selectNode: (id) => set((s) => ({ selectedNodeId: id, viewSequence: id !== null ? false : s.viewSequence })),
 
   updateNodeParam: (id, paramName, value) => {
     set((s) => ({
@@ -196,13 +342,20 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         target_input: DEFAULT_TARGET_INPUT,
       })),
     };
+    const goalName = get().goalName;
+    const myRequestId = ++cookRequestId;
     try {
       const res = await fetch(`/api/pipeline/${encodeURIComponent(tag)}/cook`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ run, graph }),
+        body: JSON.stringify({ run, graph, context: goalName ? { goal: goalName } : undefined }),
       });
       const data: CookResponse = await res.json();
+      // A newer cook() call was made while this one was in flight (e.g.
+      // picking a goal re-cooks immediately, superseding a param-edit
+      // auto-cook that was still pending) -- applying this now-stale
+      // response would silently overwrite the newer one's diagnostics.
+      if (myRequestId !== cookRequestId) return;
       if (!data.ok) {
         set({ cookError: data.error ?? "cook failed", cooking: false });
         return;
@@ -216,6 +369,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         cooking: false,
       }));
     } catch (e) {
+      if (myRequestId !== cookRequestId) return;
       set({ cookError: String(e), cooking: false });
     }
   },
@@ -238,8 +392,28 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       clearTimeout(autoCookTimer);
       autoCookTimer = null;
     }
-    set({ nodes: [], edges: [], selectedNodeId: null, cookError: null, cooking: false, diagnostics: {} });
+    set({
+      nodes: [], edges: [], selectedNodeId: null, cookError: null, cooking: false, diagnostics: {},
+      viewSequence: false,
+    });
     get().fetchNodeKinds();
+  },
+
+  // Unlike resetGraph alone (local-only, see its own docstring), this ALSO
+  // purges the server's cooked-mesh buffer for this run/tag -- every
+  // per-node mesh tag AND the "{tag}/__sequence__" history -- so cooked
+  // slab-model state actually gets released, not just hidden from the
+  // current browser session.
+  clearCache: async () => {
+    const { run, tag } = get();
+    get().resetGraph();
+    try {
+      await fetch(`/api/pipeline/${encodeURIComponent(tag)}/cache?run=${encodeURIComponent(run)}`, {
+        method: "DELETE",
+      });
+    } catch (e) {
+      console.error("Failed to clear server-side pipeline cache:", e);
+    }
   },
 
   loadPath: (path) => {
@@ -266,6 +440,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       selectedNodeId: ids[0] ?? null,
       cookError: null,
       diagnostics: {},
+      viewSequence: false,
     });
     get().cook();
   },
@@ -344,6 +519,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       selectedNodeId: newNodes[0]?.id ?? null,
       cookError: null,
       diagnostics: {},
+      viewSequence: false,
     });
     get().cook();
   },

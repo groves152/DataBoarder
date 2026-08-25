@@ -62,12 +62,36 @@ export interface PathNodeSpec {
   params: Record<string, ParamValue>;
 }
 
+// Snapshot of the global render/press-config toggles (ViewportSidebar) at
+// export time -- NOT per-node data, so it lives alongside a path/graph
+// rather than inside any one node's params. Every field optional: an
+// older export (or a hand-written/generator-produced one) simply omits
+// this, and import falls back to whatever the session's current settings
+// already are, key by key -- a partial settings block still restores what
+// it has instead of being rejected wholesale.
+export interface AppSettingsSnapshot {
+  goalName?: string | null;
+  goalVisible?: boolean;
+  goalOpacity?: number;
+  billetOpacity?: number;
+  showPressPreview?: boolean;
+  defaultTool?: string | null;
+  forceCorrectClosure?: boolean;
+  phiSymmetry?: string;
+  expandedNodes?: boolean;
+  materialParams?: {
+    beta: number; plastic_decay_ahead_mm: number; plastic_decay_behind_mm: number; plastic_kernel_power: number;
+  };
+  tuningProfileName?: string;
+}
+
 export interface PathJson {
   format: string;
   name: string;
   root: PathNodeSpec;
   steps: PathNodeSpec[];
   metadata?: Record<string, unknown>;
+  app_settings?: AppSettingsSnapshot;
 }
 
 export interface GeneratorSchema {
@@ -94,4 +118,39 @@ export interface GraphNodeJson {
 export interface GraphJson {
   nodes: GraphNodeJson[];
   edges: PipelineEdgeSpec[];
+  app_settings?: AppSettingsSnapshot;
+}
+
+// Panel sizes as a map of Panel id -> percentage (0..100), the exact shape
+// react-resizable-panels' `Group.getLayout()`/`setLayout()` produce/accept
+// (its own `Layout` type) -- redeclared here rather than importing that
+// package's type into a shared types file with no other UI-library
+// dependency.
+export type PanelLayout = Record<string, number>;
+
+// "Similar to how VSCode works" -- a separate export from the path/graph
+// JSON above: this captures UI/session state (render toggles, active tab,
+// panel drag-resize positions), never node/edge topology, so importing one
+// never touches the other and the two can be combined freely (e.g. import a
+// path, then separately restore a saved workspace layout on top of it).
+export interface WorkspaceJson {
+  format: "databoarder_workspace/v1";
+  app_settings?: AppSettingsSnapshot;
+  activeTab?: "graph" | "tuning";
+  layouts?: {
+    outer?: PanelLayout;
+    meshRow?: PanelLayout;
+    graphRow?: PanelLayout;
+  };
+}
+
+// One entry from GET /api/forge/tuning_profiles (forge_genie's own route,
+// not part of DataBoarder's generic API -- see ui_nodes/tuning_profiles.py).
+export interface TuningProfile {
+  name: string;
+  label: string;
+  beta: number;
+  plastic_decay_ahead_mm: number;
+  plastic_decay_behind_mm: number;
+  plastic_kernel_power: number;
 }

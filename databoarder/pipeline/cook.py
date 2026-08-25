@@ -34,6 +34,16 @@ def cook(graph: Graph, registry: PipelineRegistry, context: dict[str, Any] | Non
         incoming_edges[e.target].append(e)
 
     result = CookResult()
+    # The FIRST node's own computed value, generic/opaque to DataBoarder
+    # core -- e.g. a graph's root/starting state, useful for a diagnostic
+    # that needs an episode-start reference regardless of how deep into
+    # the chain the current node is (a before/after delta alone can't
+    # express "progress toward this goal since the very beginning").
+    # Correct for the common case this UI actually produces (one linear
+    # chain); a graph with multiple disconnected root nodes would only
+    # get ONE of them here, since `order` has no notion of separate chains.
+    root_value: Any = None
+    root_id = order[0] if order else None
 
     for node_id in order:
         node = nodes_by_id[node_id]
@@ -53,6 +63,8 @@ def cook(graph: Graph, registry: PipelineRegistry, context: dict[str, Any] | Non
             )
 
         result.values[node_id] = spec.handler(**inputs, **node.params)
+        if node_id == root_id:
+            root_value = result.values[node_id]
 
         if spec.to_mesh is not None:
             result.meshes[node_id] = spec.to_mesh(result.values[node_id])
@@ -65,7 +77,7 @@ def cook(graph: Graph, registry: PipelineRegistry, context: dict[str, Any] | Non
             # the graph.
             try:
                 result.diagnostics[node_id] = spec.diagnostics(
-                    result.values[node_id], node.params, inputs, context
+                    result.values[node_id], node.params, inputs, context, root_value
                 )
             except Exception as e:
                 result.diagnostics[node_id] = {"error": str(e)}

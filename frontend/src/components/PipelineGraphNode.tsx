@@ -1,11 +1,18 @@
 import { Handle, Position, type NodeProps, type Node } from "@xyflow/react";
 import type { PipelineNodeData } from "@/types/pipeline";
 import { usePipelineStore } from "@/stores/pipelineStore";
+import { formatRadiansAsPi } from "@/utils/angleFormat";
 
 type PipelineNodeType = Node<PipelineNodeData>;
 
 const handleClass =
   "!bg-accent !border-2 !border-surface !w-4 !h-4 hover:!scale-125 transition-transform";
+
+function formatParamValue(name: string, value: unknown): string {
+  if (name === "phi" && typeof value === "number") return formatRadiansAsPi(value);
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  return String(value);
+}
 
 export function PipelineGraphNode({ id, data, selected }: NodeProps<PipelineNodeType>) {
   // Only ever true when the GLOBAL "Physical press limit" toggle
@@ -14,6 +21,8 @@ export function PipelineGraphNode({ id, data, selected }: NodeProps<PipelineNode
   // `capped` computation can never come back true in the first place
   // (see slab_nodes.py) -- no separate frontend gating needed here.
   const capped = usePipelineStore((s) => Boolean(s.diagnostics[id]?.capped));
+  const expandedNodes = usePipelineStore((s) => s.expandedNodes);
+  const connectNearestTarget = usePipelineStore((s) => s.connectNearestTarget);
 
   return (
     <div
@@ -29,7 +38,26 @@ export function PipelineGraphNode({ id, data, selected }: NodeProps<PipelineNode
         />
         <span className="text-xs font-semibold text-gray-200">{data.kind}</span>
       </div>
-      <Handle type="source" position={Position.Right} className={handleClass} title="Drag from here to a downstream node's input dot" />
+      {expandedNodes && (
+        <div className="mt-1.5 pt-1.5 border-t border-border flex flex-col gap-0.5">
+          {Object.entries(data.params).map(([name, value]) => (
+            <div key={name} className="flex justify-between gap-3 text-[10px] text-gray-400 tabular-nums">
+              <span className="text-gray-500">{name}</span>
+              <span className="text-gray-300">{formatParamValue(name, value)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <Handle
+        type="source"
+        position={Position.Right}
+        className={handleClass}
+        title="Drag to a downstream node's input dot, or double-click to auto-connect to the nearest available one"
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          connectNearestTarget(id);
+        }}
+      />
       {capped && (
         <span
           title="Limited by physical press capacity -- requested closure exceeds what a real press achieves in one hit"

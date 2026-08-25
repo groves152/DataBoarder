@@ -5,12 +5,16 @@ import type { ParamSpec, ParamValue } from "@/types/pipeline";
 // (editing a graph node's params) and GenerateDialog (filling in a path
 // generator's params before running it) -- same rendering rules either way.
 export function ParamControl({
-  name, spec, value, onChange,
+  name, spec, value, onChange, formatValue,
 }: {
   name: string;
   spec: ParamSpec;
   value: ParamValue;
   onChange: (v: ParamValue) => void;
+  // Overrides the numeric readout next to a float slider (e.g. showing
+  // phi in radians as "π/2" instead of "1.57") -- ignored for int/select/
+  // bool. Optional, defaults to the plain 2-decimal display.
+  formatValue?: (v: number) => string;
 }) {
   const label = spec.label ?? name;
   const title = spec.description;
@@ -53,7 +57,7 @@ export function ParamControl({
       <span className="flex justify-between">
         <span className={title ? "border-b border-dotted border-gray-600" : undefined}>{label}</span>
         <span className="tabular-nums text-gray-300">
-          {spec.type === "int" ? numValue : numValue.toFixed(2)}
+          {spec.type === "int" ? numValue : formatValue ? formatValue(numValue) : numValue.toFixed(2)}
         </span>
       </span>
       <input

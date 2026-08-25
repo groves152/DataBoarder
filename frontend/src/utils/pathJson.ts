@@ -2,7 +2,7 @@
 // editor's import/export/paste flows (`PathMenu.tsx`, `PasteJsonDialog.tsx`,
 // `RawJsonDialog.tsx`). Split out once a second consumer (paste) needed the
 // exact same detection logic the file importer already had.
-import type { PathJson, GraphJson } from "@/types/pipeline";
+import type { PathJson, GraphJson, WorkspaceJson } from "@/types/pipeline";
 
 export function isPathJson(data: unknown): data is PathJson {
   if (typeof data !== "object" || data === null) return false;
@@ -18,6 +18,12 @@ export function isGraphJson(data: unknown): data is GraphJson {
   if (typeof data !== "object" || data === null) return false;
   const d = data as Record<string, unknown>;
   return Array.isArray(d.nodes) && Array.isArray(d.edges);
+}
+
+export function isWorkspaceJson(data: unknown): data is WorkspaceJson {
+  if (typeof data !== "object" || data === null) return false;
+  const d = data as Record<string, unknown>;
+  return d.format === "databoarder_workspace/v1";
 }
 
 export function downloadJson(data: unknown, filename: string) {

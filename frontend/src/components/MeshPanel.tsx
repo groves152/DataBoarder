@@ -1,9 +1,21 @@
 import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls, Center, GizmoHelper, GizmoViewport } from "@react-three/drei";
-import { useMemo, useState, useEffect, useRef, useCallback, type ReactNode } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback, type ReactNode, type MutableRefObject } from "react";
 import * as THREE from "three";
 import { useTagData } from "@/hooks/useTagData";
 import type { MeshData } from "@/types";
+
+export interface CameraState {
+  position: [number, number, number];
+  target: [number, number, number];
+}
+
+type ControlsLike = {
+  target: THREE.Vector3;
+  update: () => void;
+  addEventListener: (type: string, cb: () => void) => void;
+  removeEventListener: (type: string, cb: () => void) => void;
+};
 
 interface Props {
   run: string;
@@ -24,45 +36,115 @@ interface Props {
   // affect overlay-all (ghosted multi-frame) mode, which already computes
   // its own per-frame opacity gradient for that view.
   meshOpacity?: number;
+  // Persists camera position/orbit-target ACROSS remounts (e.g. switching
+  // which node's tag this panel points at) via a ref the CALLER owns --
+  // MeshPanel itself remounts on every tag change (a fresh <Canvas>, fresh
+  // three.js camera/controls each time), so anything it wants to survive
+  // that has to live outside it. Optional and opt-in: omitted entirely,
+  // behavior is unchanged from before (auto-fit once per (run,tag), no
+  // persistence) -- this only applies where a caller explicitly wants
+  // "camera state stays put while browsing between nodes" (PipelineView),
+  // not other MeshPanel usages (Dashboard, MultiPanel) that show
+  // unrelated meshes at unrelated scales and shouldn't inherit it.
+  cameraState?: MutableRefObject<CameraState | null>;
 }
 
 const MAX_OVERLAY = 20;
 
+function computeAutoFitState(frame: MeshData): { camPos: [number, number, number]; dist: number } {
+  let maxDist = 1;
+  for (const v of frame.vertices) {
+    const d = Math.hypot(v[0], v[1], v[2]);
+    if (d > maxDist) maxDist = d;
+  }
+  const dist = maxDist * 2.5;
+  return { camPos: [dist * 0.55, dist * 0.65, dist * 0.55], dist };
+}
+
 // Camera used to be a fixed `position={[0, 6, 4]}` regardless of mesh
 // scale -- fine for small content, way too close for a 60mm-long billet
-// (looked "reset very close" every time a panel opened). Instead, frame
-// the camera once per distinct (run, tag) source based on the actual
-// vertex bounding radius, and leave it alone afterward so scrubbing/
-// playback doesn't jitter the view every frame.
-function AutoFitCamera({ run, tag, frame }: { run: string; tag: string; frame?: MeshData }) {
+// (looked "reset very close" every time a panel opened). Auto-fits ONCE
+// based on the first mesh it ever sees (the vertex bounding radius), then:
+// - without `cameraStateRef`: leaves the camera alone afterward, same as
+//   before -- fine for a component that never remounts mid-viewing.
+// - with `cameraStateRef`: on EVERY mount, restores the ref's last-saved
+//   position/target instead of re-auto-fitting (so switching nodes doesn't
+//   reset your view), and keeps the ref updated live via OrbitControls'
+//   own "change" event (drag/pan/zoom) so the NEXT mount picks it back up.
+//   The very first-ever mount (ref still empty) still auto-fits, seeding
+//   the ref from the starting mesh -- "reasonable default, then persists."
+function SceneCamera({
+  run, tag, frame, cameraStateRef,
+}: { run: string; tag: string; frame?: MeshData; cameraStateRef?: MutableRefObject<CameraState | null> }) {
   const { camera } = useThree();
-  const controls = useThree((s) => s.controls) as { target: THREE.Vector3; update: () => void } | null;
+  const controls = useThree((s) => s.controls) as ControlsLike | null;
+  const appliedRef = useRef(false);
   const firedForKey = useRef<string | null>(null);
 
   useEffect(() => {
+    if (cameraStateRef) {
+      // Persistent mode: apply once per MOUNT (a fresh Canvas each time),
+      // preferring the saved state over a fresh auto-fit.
+      if (appliedRef.current) return;
+      const saved = cameraStateRef.current;
+      if (saved) {
+        camera.position.set(...saved.position);
+        camera.near = 0.01;
+        camera.far = 100000;
+        if ("updateProjectionMatrix" in camera) (camera as THREE.PerspectiveCamera).updateProjectionMatrix();
+        if (controls) {
+          controls.target.set(...saved.target);
+          controls.update();
+        }
+        appliedRef.current = true;
+      } else if (frame) {
+        const { camPos, dist } = computeAutoFitState(frame);
+        camera.position.set(...camPos);
+        camera.near = Math.max(dist * 0.01, 0.01);
+        camera.far = dist * 20;
+        camera.lookAt(0, 0, 0);
+        if ("updateProjectionMatrix" in camera) (camera as THREE.PerspectiveCamera).updateProjectionMatrix();
+        if (controls) {
+          controls.target.set(0, 0, 0);
+          controls.update();
+        }
+        cameraStateRef.current = { position: camPos, target: [0, 0, 0] };
+        appliedRef.current = true;
+      }
+      // else: no saved state AND no frame yet -- wait for a frame to arrive.
+      return;
+    }
+
+    // Non-persistent mode (unchanged from before): fit once per distinct
+    // (run, tag) source, never touched again.
     const key = `${run}::${tag}`;
     if (!frame || firedForKey.current === key) return;
     firedForKey.current = key;
-
-    let maxDist = 1;
-    for (const v of frame.vertices) {
-      const d = Math.hypot(v[0], v[1], v[2]);
-      if (d > maxDist) maxDist = d;
-    }
-    const dist = maxDist * 2.5;
-
-    camera.position.set(dist * 0.55, dist * 0.65, dist * 0.55);
+    const { camPos, dist } = computeAutoFitState(frame);
+    camera.position.set(...camPos);
     camera.near = Math.max(dist * 0.01, 0.01);
     camera.far = dist * 20;
     camera.lookAt(0, 0, 0);
-    if ("updateProjectionMatrix" in camera) {
-      (camera as THREE.PerspectiveCamera).updateProjectionMatrix();
-    }
+    if ("updateProjectionMatrix" in camera) (camera as THREE.PerspectiveCamera).updateProjectionMatrix();
     if (controls) {
       controls.target.set(0, 0, 0);
       controls.update();
     }
-  }, [run, tag, frame, camera, controls]);
+  }, [run, tag, frame, camera, controls, cameraStateRef]);
+
+  // Keep the ref live so the NEXT mount (a different node's tag) picks up
+  // wherever the user left off -- "maintains clicked drag state."
+  useEffect(() => {
+    if (!cameraStateRef || !controls) return;
+    const save = () => {
+      cameraStateRef.current = {
+        position: [camera.position.x, camera.position.y, camera.position.z],
+        target: [controls.target.x, controls.target.y, controls.target.z],
+      };
+    };
+    controls.addEventListener("change", save);
+    return () => controls.removeEventListener("change", save);
+  }, [cameraStateRef, controls, camera]);
 
   return null;
 }
@@ -129,7 +211,7 @@ function sampleFrames(frames: MeshData[], n: number): MeshData[] {
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
-export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1 }: Props) {
+export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, cameraState }: Props) {
   const entries = useTagData(run, tag);
 
   // Dedupe by step, keeping the LAST occurrence -- a `replace=True` push
@@ -228,7 +310,7 @@ export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1 }:
           <ambientLight intensity={0.4} />
           <directionalLight position={[5, 8, 5]} intensity={1.2} castShadow />
           <directionalLight position={[-5, -3, -5]} intensity={0.3} />
-          <AutoFitCamera run={run} tag={tag} frame={currentFrame} />
+          <SceneCamera run={run} tag={tag} frame={currentFrame} cameraStateRef={cameraState} />
 
           {overlayAll ? (
             // No <Center> in overlay — frames sit in their natural coordinate

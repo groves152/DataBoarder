@@ -11,29 +11,41 @@ const nodeTypes = { pipelineNode: PipelineGraphNode };
 export function GraphPanel() {
   const {
     nodeKinds, nodes, edges, selectedNodeId,
-    fetchNodeKinds, addNode, deleteNode, selectNode, resetGraph, clearCache,
+    fetchNodeKinds, addNode, deleteSelectedNodes, selectNode, resetGraph, clearCache,
     onNodesChange, onEdgesChange, onConnect,
+    copyNodes, paste, expandedNodes, setExpandedNodes,
   } = usePipelineStore();
 
   useEffect(() => {
     fetchNodeKinds();
   }, [fetchNodeKinds]);
 
-  // Custom delete handling (not react-flow's built-in deleteKeyCode) so
-  // removing a node also cleans up its edges and marks downstream nodes
-  // stale via the store's own deleteNode.
+  // Custom delete/copy/paste handling (not react-flow's built-ins) so
+  // delete also cleans up edges/marks downstream stale AND covers a
+  // multi-selection (via the store's own deleteSelectedNodes), and
+  // copy/paste work on NODE PARAMS (or, pasting into empty space, whole
+  // new nodes) rather than react-flow's own node-object clipboard concept.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const target = e.target as HTMLElement | null;
       const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA");
       if (typing) return;
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedNodeId) {
-        deleteNode(selectedNodeId);
+      if (e.key === "Delete" || e.key === "Backspace") {
+        deleteSelectedNodes();
+      }
+      const cmdOrCtrl = e.metaKey || e.ctrlKey;
+      if (cmdOrCtrl && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        copyNodes();
+      }
+      if (cmdOrCtrl && e.key.toLowerCase() === "v") {
+        e.preventDefault();
+        paste();
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedNodeId, deleteNode]);
+  }, [deleteSelectedNodes, copyNodes, paste]);
 
   return (
     <div className="h-full w-full bg-surface">
@@ -65,7 +77,8 @@ export function GraphPanel() {
             ))}
             {selectedNodeId && (
               <button
-                onClick={() => deleteNode(selectedNodeId)}
+                onClick={() => deleteSelectedNodes()}
+                title="Deletes every multi-selected node if any, else just this one"
                 className="text-xs px-2 py-1 rounded bg-surface border border-border text-red-400 hover:border-red-400 transition-colors"
               >
                 Delete node
@@ -93,8 +106,22 @@ export function GraphPanel() {
           </div>
         </Panel>
         <Panel position="top-right">
-          <div className="text-[11px] px-2 py-1 rounded bg-panel border border-border text-gray-500">
-            Shift-drag to box-select, ctrl/cmd-click to multi-select — use Path ▾ to export a selection
+          <div className="flex items-center gap-2">
+            <label
+              className="flex items-center gap-1.5 cursor-pointer select-none text-[11px] px-2 py-1 rounded bg-panel border border-border text-gray-400"
+              title="Show every node's current param values inline on its card"
+            >
+              <input
+                type="checkbox"
+                checked={expandedNodes}
+                onChange={(e) => setExpandedNodes(e.target.checked)}
+                className="accent-accent"
+              />
+              <span>Expand nodes</span>
+            </label>
+            <div className="text-[11px] px-2 py-1 rounded bg-panel border border-border text-gray-500">
+              Shift-drag to box-select, ctrl/cmd-click to multi-select — use Path ▾ to export a selection
+            </div>
           </div>
         </Panel>
         {nodes.length > 0 && edges.length === 0 && (

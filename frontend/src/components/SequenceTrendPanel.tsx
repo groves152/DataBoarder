@@ -1,7 +1,8 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import Plot from "react-plotly.js";
 import { usePipelineStore } from "@/stores/pipelineStore";
 import { topologicalOrder } from "@/utils/graphOrder";
+import { useDispatchResizeOnContainerResize } from "@/utils/useDispatchResizeOnContainerResize";
 
 interface Props {
   // Which step MeshPanel is CURRENTLY showing during sequence playback
@@ -15,8 +16,6 @@ interface Props {
   // the trend. Not mutually exclusive with playbackStep; both can be
   // visible at once.
   selectedNodeId: string | null;
-  expanded: boolean;
-  onToggleExpanded: () => void;
   onClose: () => void;
 }
 
@@ -38,7 +37,7 @@ const ROWS: Row[] = [
 const COLORS = ["#7c6af7", "#f97316", "#22d3ee", "#4ade80"];
 const SELECTED_MARKER_COLOR = "#ffffff";
 
-export function SequenceTrendPanel({ playbackStep, selectedNodeId, expanded, onToggleExpanded, onClose }: Props) {
+export function SequenceTrendPanel({ playbackStep, selectedNodeId, onClose }: Props) {
   const nodes = usePipelineStore((s) => s.nodes);
   const edges = usePipelineStore((s) => s.edges);
   const diagnostics = usePipelineStore((s) => s.diagnostics);
@@ -48,6 +47,9 @@ export function SequenceTrendPanel({ playbackStep, selectedNodeId, expanded, onT
   // both FIFO-tie-broken in the same node-array order the graph was sent
   // in) -- so a step index here lines up 1:1 with the mesh panel's own
   // step numbering, no separate lookup needed.
+  const plotContainerRef = useRef<HTMLDivElement>(null);
+  useDispatchResizeOnContainerResize(plotContainerRef);
+
   const order = useMemo(() => topologicalOrder(nodes, edges) ?? [], [nodes, edges]);
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const selectedStep = selectedNodeId ? order.indexOf(selectedNodeId) : -1; // -1 -> never matches a real step
@@ -81,13 +83,6 @@ export function SequenceTrendPanel({ playbackStep, selectedNodeId, expanded, onT
     <div className="flex items-center gap-1.5 px-2 py-1 border-b border-border text-xs text-gray-400 shrink-0">
       <span className="font-semibold uppercase tracking-wide text-[10px]">Actions &amp; reward</span>
       <div className="ml-auto flex items-center gap-1">
-        <button
-          onClick={onToggleExpanded}
-          title={expanded ? "Narrow panel" : "Widen panel"}
-          className="w-5 h-5 flex items-center justify-center rounded hover:bg-surface hover:text-white transition-colors"
-        >
-          {expanded ? "⇥" : "⇤"}
-        </button>
         <button
           onClick={onClose}
           title="Hide this panel"
@@ -173,17 +168,8 @@ export function SequenceTrendPanel({ playbackStep, selectedNodeId, expanded, onT
   return (
     <div className="flex flex-col h-full">
       {header}
-      <div className="flex-1 min-h-0">
+      <div ref={plotContainerRef} className="flex-1 min-h-0">
         <Plot
-          // react-plotly.js's `useResizeHandler` only listens for WINDOW
-          // resize events -- toggling `expanded` changes this panel's
-          // container width via a class swap, not a window resize, so
-          // Plotly never re-measured and the plot stayed rendered at its
-          // old size. Keying on `expanded` forces a full remount instead:
-          // the parent div's new width class is already applied by the
-          // time the fresh Plot instance mounts and measures its
-          // container, in the same React commit.
-          key={expanded ? "expanded" : "normal"}
           data={data}
           layout={layout}
           config={{ responsive: true, displayModeBar: false }}

@@ -1,21 +1,24 @@
-import { useState } from "react";
-import { usePipelineStore } from "@/stores/pipelineStore";
+import { usePipelineStore, PHI_SYMMETRY_PRESETS, type PhiSymmetry } from "@/stores/pipelineStore";
 import { GoalPicker } from "./GoalPicker";
 
-// Collapsible left-of-viewport panel holding every rendering/press-config
-// control that used to live scattered across the top toolbar (press
-// preview, billet opacity, goal picker) plus the physical-press-limit
-// toggle (previously a per-node param, see NodeInspector's filter) and a
-// new default-press-geometry picker -- pulled out specifically because the
-// toolbar was getting crowded (direct ask: "top ribbon/banner is getting
-// quite busy").
+// Render/press-config panel, left of the mesh viewport -- collapse/resize
+// is now handled by the wrapping <Panel> (react-resizable-panels: drag to
+// its minimum, or a collapse control the caller wires up), not an
+// internal width-toggle here -- a hand-rolled collapsed-width div would
+// fight with the Panel's own drag-computed width. Holds every rendering/
+// press-config control that used to live scattered across the top toolbar
+// (press preview, billet opacity, goal picker) plus the physical-press-
+// limit toggle (previously a per-node param, see NodeInspector's filter)
+// and a default-press-geometry picker -- pulled out specifically because
+// the toolbar was getting crowded (direct ask: "top ribbon/banner is
+// getting quite busy").
 export function ViewportSidebar() {
-  const [collapsed, setCollapsed] = useState(false);
   const {
     showPressPreview, setShowPressPreview,
     billetOpacity, setBilletOpacity,
     nodeKinds, defaultTool, setDefaultTool,
     forceCorrectClosure, setForceCorrectClosure,
+    phiSymmetry, setPhiSymmetry,
   } = usePipelineStore();
 
   // Whichever registered node kind's schema has a "tool" param first --
@@ -23,31 +26,10 @@ export function ViewportSidebar() {
   // convention used elsewhere (e.g. PipelineView's previewOverlay).
   const toolOptions = nodeKinds.find((k) => k.params.tool)?.params.tool.options ?? [];
 
-  if (collapsed) {
-    return (
-      <div className="w-7 border-r border-border shrink-0 flex flex-col items-center pt-2">
-        <button
-          onClick={() => setCollapsed(false)}
-          title="Expand render settings"
-          className="w-5 h-5 flex items-center justify-center rounded text-gray-400 hover:bg-surface hover:text-white transition-colors"
-        >
-          »
-        </button>
-      </div>
-    );
-  }
-
   return (
-    <div className="w-56 border-r border-border shrink-0 flex flex-col overflow-y-auto">
+    <div className="h-full w-full flex flex-col overflow-y-auto">
       <div className="flex items-center gap-1.5 px-2 py-1 border-b border-border text-xs text-gray-400 shrink-0">
         <span className="font-semibold uppercase tracking-wide text-[10px]">Render settings</span>
-        <button
-          onClick={() => setCollapsed(true)}
-          title="Collapse"
-          className="ml-auto w-5 h-5 flex items-center justify-center rounded hover:bg-surface hover:text-white transition-colors"
-        >
-          «
-        </button>
       </div>
 
       <div className="flex-1 px-2.5 py-3 flex flex-col gap-4 text-xs text-gray-400">
@@ -94,6 +76,25 @@ export function ViewportSidebar() {
           </label>
           <span className="text-[10px] text-gray-600">
             Applies to newly added nodes only — each node can still override its own "Press geometry" in the inspector.
+          </span>
+        </div>
+
+        <div className="border-t border-border pt-3 flex flex-col gap-1.5">
+          <label className="flex flex-col gap-1">
+            <span>Strike symmetry</span>
+            <select
+              value={phiSymmetry}
+              onChange={(e) => setPhiSymmetry(e.target.value as PhiSymmetry)}
+              className="bg-surface border border-border rounded px-1.5 py-1 text-gray-200 w-full"
+            >
+              {(Object.entries(PHI_SYMMETRY_PRESETS) as [PhiSymmetry, { label: string }][]).map(([key, { label }]) => (
+                <option key={key} value={key}>{label}</option>
+              ))}
+            </select>
+          </label>
+          <span className="text-[10px] text-gray-600">
+            Constrains each strike's angle to evenly-spaced positions matching a target cross-section — each strike
+            is already two-sided, so N faces only needs N/2 angles.
           </span>
         </div>
 

@@ -1,14 +1,30 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Group, Panel, Separator, useDefaultLayout, useGroupRef } from "react-resizable-panels";
 import { usePipelineStore, TARGETS_RUN, TARGETS_TAG_PREFIX } from "@/stores/pipelineStore";
 import { GraphPanel } from "./GraphPanel";
 import { NodeInspector } from "./NodeInspector";
-import { MeshPanel } from "./MeshPanel";
+import { MeshPanel, type CameraState } from "./MeshPanel";
 import { PressPreview, type ToolDims } from "./PressPreview";
 import { PathMenu } from "./PathMenu";
+import { WorkspaceMenu } from "./WorkspaceMenu";
 import { SequenceViewToggle } from "./SequenceViewToggle";
 import { GoalOverlay } from "./GoalOverlay";
 import { SequenceTrendPanel } from "./SequenceTrendPanel";
 import { ViewportSidebar } from "./ViewportSidebar";
+import { TuningPanel } from "./TuningPanel";
+
+// Drag handle between two Panels in a Group -- headless library, no default
+// styling (see react-resizable-panels' own docs: "Use the `data-separator`
+// attribute for custom hover/active styles"). `data-[orientation=...]`
+// selects horizontal (left/right split, drag left-right, resizes width) vs
+// vertical (top/bottom split, drag up-down, resizes height) automatically
+// from the attribute the library itself sets.
+const SEPARATOR_CLASS =
+  "shrink-0 bg-border hover:bg-accent/60 data-[state=dragging]:bg-accent transition-colors " +
+  "data-[orientation=horizontal]:w-1 data-[orientation=horizontal]:cursor-col-resize " +
+  "data-[orientation=vertical]:h-1 data-[orientation=vertical]:cursor-row-resize";
+
+type Tab = "graph" | "tuning";
 
 export function PipelineView() {
   const {
@@ -27,9 +43,60 @@ export function PipelineView() {
   // Independent of viewSequence -- the trend panel is useful in BOTH
   // sequence playback AND single-node editing (it shows the selected
   // node's own position on the trend even with no playback happening),
-  // so it's its own on/off + width state, not gated on playback mode.
+  // so it's its own on/off toggle. Width is now drag-resizable (its own
+  // Panel below) instead of a two-step "normal/expanded" toggle.
   const [showTrendPanel, setShowTrendPanel] = useState(true);
-  const [trendPanelExpanded, setTrendPanelExpanded] = useState(false);
+  // Lives here, NOT inside MeshPanel -- MeshPanel itself fully remounts
+  // (fresh <Canvas>/camera/controls) every time `meshTag` changes below
+  // (switching nodes, or toggling sequence view), but THIS component
+  // doesn't remount just because the user clicked a different node, so a
+  // ref here survives across those switches. Auto-fits once from the
+  // first mesh it ever sees, then camera drag/pan/zoom state persists
+  // across every subsequent node switch instead of resetting.
+  const cameraStateRef = useRef<CameraState | null>(null);
+
+  // "Wrap the entire graph view in a tab, and add the tuning UI as another
+  // tab in that same panel" -- Graph (GraphPanel + NodeInspector) and
+  // Tuning (TuningPanel) now share the bottom half of the view as tabs
+  // rather than the Graph pairing being the only thing shown there.
+  const [activeTab, setActiveTab] = useState<Tab>("graph");
+
+  // Imperative handles for each drag-resizable Group, needed for
+  // WorkspaceMenu's explicit JSON export/import (getLayout/setLayout) --
+  // separate from the automatic localStorage persistence below, which
+  // needs no ref at all.
+  const outerGroupRef = useGroupRef();
+  const meshRowGroupRef = useGroupRef();
+  const graphRowGroupRef = useGroupRef();
+
+  // "Panels have drag handles to resize on the fly" -- each Group also
+  // auto-persists its own layout to localStorage (survives a page reload)
+  // independent of WorkspaceMenu's explicit export/import file. `panelIds`
+  // covers meshRow's conditionally-rendered "pv-trend" panel so a saved
+  // layout from a session with the trend panel open still applies
+  // correctly to one with it closed, and vice versa.
+  const outerLayout = useDefaultLayout({ id: "pipeline-outer" });
+  const meshRowLayout = useDefaultLayout({ id: "pipeline-mesh-row", panelIds: ["pv-sidebar", "pv-mesh", "pv-trend"] });
+  const graphRowLayout = useDefaultLayout({ id: "pipeline-graph-row" });
+
+  // The Graph tab's own Group only exists in the DOM while that tab is
+  // active, so an imported workspace's graphRow layout can't always be
+  // applied synchronously (see WorkspaceMenu's import handler) -- this
+  // holds a layout to apply as soon as that Group next mounts.
+  const pendingGraphRowLayoutRef = useRef<Record<string, number> | null>(null);
+  const applyGraphRowLayoutWhenMounted = useCallback((layout: Record<string, number>) => {
+    if (graphRowGroupRef.current) {
+      graphRowGroupRef.current.setLayout(layout);
+    } else {
+      pendingGraphRowLayoutRef.current = layout;
+    }
+  }, [graphRowGroupRef]);
+  useEffect(() => {
+    if (activeTab === "graph" && pendingGraphRowLayoutRef.current && graphRowGroupRef.current) {
+      graphRowGroupRef.current.setLayout(pendingGraphRowLayoutRef.current);
+      pendingGraphRowLayoutRef.current = null;
+    }
+  }, [activeTab, graphRowGroupRef]);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedSchema = nodeKinds.find((k) => k.kind === selectedNode?.data.kind);
@@ -65,6 +132,7 @@ export function PipelineView() {
         phi={Number(selectedNode.data.params.phi ?? p.phi.default)}
         rho={rho}
         toolDims={toolDims}
+        toolName={toolName}
         capped={capped}
       />
     );
@@ -108,6 +176,14 @@ export function PipelineView() {
           {cooking ? "Cooking…" : "Cook"}
         </button>
         <PathMenu />
+        <WorkspaceMenu
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          outerGroupRef={outerGroupRef}
+          meshRowGroupRef={meshRowGroupRef}
+          graphRowGroupRef={graphRowGroupRef}
+          applyGraphRowLayoutWhenMounted={applyGraphRowLayoutWhenMounted}
+        />
         <SequenceViewToggle />
         <label className="flex items-center gap-1.5 ml-2 cursor-pointer select-none text-gray-400">
           <input
@@ -124,65 +200,124 @@ export function PipelineView() {
         </span>
       </div>
 
-      <div className="flex-1 flex flex-col min-h-0">
-        <div className="h-1/2 min-h-0 border-b border-border flex">
-          <ViewportSidebar />
-          <div className="flex-1 min-w-0">
-            {(() => {
-              const meshTag = viewSequence ? `${tag}/__sequence__` : selectedNodeId ? `${tag}/${selectedNodeId}` : null;
-              if (!meshTag) {
-                return (
-                  <div className="h-full w-full flex items-center justify-center text-xs text-gray-500">
-                    Select a node to preview its cooked geometry (its own state, including every upstream hit applied so far).
-                  </div>
-                );
-              }
-              // meshTag stays constant (`${tag}/__sequence__`) for the WHOLE
-              // duration of sequence playback, so this key does NOT change
-              // on every playback tick -- MeshPanel's own internal
-              // scrubber/play loop steps through the frames it already
-              // fetched, no remount/re-fetch per hit. Outside sequence view,
-              // meshTag still embeds selectedNodeId, so clicking a different
-              // node still remounts as before (each node has only ONE
-              // current mesh, no history, so a fresh mount per click is
-              // correct there, not the thing that was flashing).
-              return (
-                <MeshPanel
-                  key={`${run}::${meshTag}`}
-                  run={run}
-                  tag={meshTag}
-                  overlay={combinedOverlay}
-                  onFrameChange={viewSequence ? setPlaybackStep : undefined}
-                  meshOpacity={billetOpacity}
-                />
-              );
-            })()}
-          </div>
-          {/* Independent of whether a node/sequence is currently shown in
-              the mesh viewport -- still useful as an overview with nothing
-              selected, and shows the selected node's own point even when
-              no playback is happening. */}
-          {showTrendPanel && (
-            <div className={`${trendPanelExpanded ? "w-[42rem]" : "w-[26rem]"} border-l border-border shrink-0`}>
-              <SequenceTrendPanel
-                playbackStep={playbackStep}
-                selectedNodeId={selectedNodeId}
-                expanded={trendPanelExpanded}
-                onToggleExpanded={() => setTrendPanelExpanded((v) => !v)}
-                onClose={() => setShowTrendPanel(false)}
-              />
-            </div>
-          )}
-        </div>
+      <div className="flex-1 min-h-0">
+        <Group
+          orientation="vertical"
+          id="pipeline-outer"
+          groupRef={outerGroupRef}
+          className="h-full w-full"
+          defaultLayout={outerLayout.defaultLayout}
+          onLayoutChanged={outerLayout.onLayoutChanged}
+        >
+          <Panel id="pv-mesh-row" defaultSize="50" minSize="20">
+            <Group
+              orientation="horizontal"
+              id="pipeline-mesh-row"
+              groupRef={meshRowGroupRef}
+              className="h-full w-full"
+              defaultLayout={meshRowLayout.defaultLayout}
+              onLayoutChanged={meshRowLayout.onLayoutChanged}
+            >
+              <Panel id="pv-sidebar" defaultSize={224} minSize={160} maxSize={420} groupResizeBehavior="preserve-pixel-size">
+                <ViewportSidebar />
+              </Panel>
+              <Separator className={SEPARATOR_CLASS} />
+              <Panel id="pv-mesh" defaultSize="60" minSize="20">
+                {(() => {
+                  const meshTag = viewSequence ? `${tag}/__sequence__` : selectedNodeId ? `${tag}/${selectedNodeId}` : null;
+                  if (!meshTag) {
+                    return (
+                      <div className="h-full w-full flex items-center justify-center text-xs text-gray-500">
+                        Select a node to preview its cooked geometry (its own state, including every upstream hit applied so far).
+                      </div>
+                    );
+                  }
+                  // meshTag stays constant (`${tag}/__sequence__`) for the
+                  // WHOLE duration of sequence playback, so this key does
+                  // NOT change on every playback tick -- MeshPanel's own
+                  // internal scrubber/play loop steps through the frames it
+                  // already fetched, no remount/re-fetch per hit. Outside
+                  // sequence view, meshTag still embeds selectedNodeId, so
+                  // clicking a different node still remounts as before
+                  // (each node has only ONE current mesh, no history, so a
+                  // fresh mount per click is correct there, not the thing
+                  // that was flashing).
+                  return (
+                    <MeshPanel
+                      key={`${run}::${meshTag}`}
+                      run={run}
+                      tag={meshTag}
+                      overlay={combinedOverlay}
+                      onFrameChange={viewSequence ? setPlaybackStep : undefined}
+                      meshOpacity={billetOpacity}
+                      cameraState={cameraStateRef}
+                    />
+                  );
+                })()}
+              </Panel>
+              {/* Independent of whether a node/sequence is currently shown
+                  in the mesh viewport -- still useful as an overview with
+                  nothing selected, and shows the selected node's own point
+                  even when no playback is happening. */}
+              {showTrendPanel && (
+                <>
+                  <Separator className={SEPARATOR_CLASS} />
+                  <Panel id="pv-trend" defaultSize={416} minSize={240} maxSize={800} groupResizeBehavior="preserve-pixel-size">
+                    <SequenceTrendPanel
+                      playbackStep={playbackStep}
+                      selectedNodeId={selectedNodeId}
+                      onClose={() => setShowTrendPanel(false)}
+                    />
+                  </Panel>
+                </>
+              )}
+            </Group>
+          </Panel>
 
-        <div className="flex-1 min-h-0 flex">
-          <div className="flex-1 min-w-0">
-            <GraphPanel />
-          </div>
-          <div className="w-72 border-l border-border shrink-0">
-            <NodeInspector />
-          </div>
-        </div>
+          <Separator className={SEPARATOR_CLASS} />
+
+          <Panel id="pv-bottom" defaultSize="50" minSize="20">
+            <div className="h-full w-full flex flex-col">
+              <div className="flex items-center gap-1 px-2 h-7 border-b border-border shrink-0 text-xs">
+                {(["graph", "tuning"] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setActiveTab(t)}
+                    className={`px-2.5 py-1 rounded-t capitalize ${
+                      activeTab === t
+                        ? "bg-surface text-white border-b-2 border-accent"
+                        : "text-gray-500 hover:text-gray-300"
+                    }`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+              <div className="flex-1 min-h-0">
+                {activeTab === "graph" ? (
+                  <Group
+                    orientation="horizontal"
+                    id="pipeline-graph-row"
+                    groupRef={graphRowGroupRef}
+                    className="h-full w-full"
+                    defaultLayout={graphRowLayout.defaultLayout}
+                    onLayoutChanged={graphRowLayout.onLayoutChanged}
+                  >
+                    <Panel id="pv-graph" defaultSize="75" minSize="30">
+                      <GraphPanel />
+                    </Panel>
+                    <Separator className={SEPARATOR_CLASS} />
+                    <Panel id="pv-inspector" defaultSize={288} minSize={220} maxSize={480} groupResizeBehavior="preserve-pixel-size">
+                      <NodeInspector />
+                    </Panel>
+                  </Group>
+                ) : (
+                  <TuningPanel />
+                )}
+              </div>
+            </div>
+          </Panel>
+        </Group>
       </div>
     </div>
   );

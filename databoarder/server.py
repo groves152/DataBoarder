@@ -36,6 +36,17 @@ def create_app(
 
     app = FastAPI(title="DataBoarder", version="0.1.0", lifespan=lifespan)
 
+    # Last cook's full CookResult per (run, tag) -- generic, opaque cache
+    # (core knows nothing about what a node's computed VALUE actually is).
+    # cook_pipeline only ever serializes .meshes/.diagnostics into its JSON
+    # response; a domain package that needs a node's raw computed value
+    # after the fact (e.g. forge_genie's "mesh selected nodes" action,
+    # which needs a forge-net node's tracked point cloud + its sampling
+    # provenance, not just the mesh preview) reads it from here via
+    # app.state rather than DataBoarder inventing a domain-specific route
+    # for it.
+    app.state.cook_cache: dict[tuple[str, str], object] = {}
+
     # ------------------------------------------------------------------
     # REST endpoints
     # ------------------------------------------------------------------
@@ -86,6 +97,8 @@ def create_app(
             result = cook(graph, pipeline_registry, context=context)
         except (KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+        app.state.cook_cache[(run, tag)] = result
 
         for node_id, (vertices, faces) in result.meshes.items():
             node_tag = f"{tag}/{node_id}"

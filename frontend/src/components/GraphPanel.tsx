@@ -13,7 +13,7 @@ export function GraphPanel() {
     nodeKinds, nodes, edges, selectedNodeId,
     fetchNodeKinds, addNode, deleteSelectedNodes, selectNode, resetGraph, clearCache,
     onNodesChange, onEdgesChange, onConnect,
-    copyNodes, paste, expandedNodes, setExpandedNodes,
+    copyNodes, paste, expandedNodes, setExpandedNodes, meshSelectedNodes,
   } = usePipelineStore();
 
   useEffect(() => {
@@ -82,6 +82,15 @@ export function GraphPanel() {
                 className="text-xs px-2 py-1 rounded bg-surface border border-border text-red-400 hover:border-red-400 transition-colors"
               >
                 Delete node
+              </button>
+            )}
+            {selectedNodeId && (
+              <button
+                onClick={() => meshSelectedNodes()}
+                title="Runs LSQR mesh reconstruction for every multi-selected forge_net node (or just this one) -- forge_net's own live autocook only ever shows the raw point cloud; this turns it into a real triangulated surface on demand"
+                className="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:border-accent hover:text-white transition-colors"
+              >
+                🔗 Mesh selected
               </button>
             )}
             <button

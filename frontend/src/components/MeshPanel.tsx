@@ -1,6 +1,6 @@
-import { Canvas, useThree } from "@react-three/fiber";
+import { Canvas, useThree, useFrame } from "@react-three/fiber";
 import { OrbitControls, Center, GizmoHelper, GizmoViewport } from "@react-three/drei";
-import { useMemo, useState, useEffect, useRef, useCallback, type ReactNode, type MutableRefObject } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback, useId, type ReactNode, type MutableRefObject } from "react";
 import * as THREE from "three";
 import { useTagData } from "@/hooks/useTagData";
 import type { MeshData } from "@/types";
@@ -47,6 +47,15 @@ interface Props {
   // not other MeshPanel usages (Dashboard, MultiPanel) that show
   // unrelated meshes at unrelated scales and shouldn't inherit it.
   cameraState?: MutableRefObject<CameraState | null>;
+  // Controller-mode's right-stick camera orbit -- the CALLER (outside the
+  // Canvas, in a plain requestAnimationFrame loop reading gamepad state)
+  // continuously overwrites this ref with THIS frame's angular deltas
+  // (radians); SceneCamera applies whatever's currently in it once per R3F
+  // frame via useFrame. Optional/inert when omitted -- every other
+  // MeshPanel usage (Dashboard, PipelineView's mouse-only viewport) is
+  // unaffected. Doesn't fight mouse-drag OrbitControls: both just move the
+  // same camera/controls.target, whichever last wrote wins that frame.
+  externalOrbitRef?: MutableRefObject<{ dAzimuth: number; dPolar: number }>;
 }
 
 const MAX_OVERLAY = 20;
@@ -74,8 +83,11 @@ function computeAutoFitState(frame: MeshData): { camPos: [number, number, number
 //   The very first-ever mount (ref still empty) still auto-fits, seeding
 //   the ref from the starting mesh -- "reasonable default, then persists."
 function SceneCamera({
-  run, tag, frame, cameraStateRef,
-}: { run: string; tag: string; frame?: MeshData; cameraStateRef?: MutableRefObject<CameraState | null> }) {
+  run, tag, frame, cameraStateRef, externalOrbitRef,
+}: {
+  run: string; tag: string; frame?: MeshData; cameraStateRef?: MutableRefObject<CameraState | null>;
+  externalOrbitRef?: MutableRefObject<{ dAzimuth: number; dPolar: number }>;
+}) {
   const { camera } = useThree();
   const controls = useThree((s) => s.controls) as ControlsLike | null;
   const appliedRef = useRef(false);
@@ -146,6 +158,35 @@ function SceneCamera({
     return () => controls.removeEventListener("change", save);
   }, [cameraStateRef, controls, camera]);
 
+  // Right-stick orbit -- standard spherical rotation of the camera around
+  // controls.target (NOT moving the target itself), polar angle clamped
+  // just short of the poles to avoid the camera flipping/gimbal-locking
+  // straight overhead. `externalOrbitRef.current` already holds THIS
+  // frame's angular delta (the caller computed it against real elapsed
+  // time in its own loop), so this just applies it once per R3F frame --
+  // no local timing/accumulation needed here.
+  useFrame(() => {
+    if (!externalOrbitRef) return;
+    const { dAzimuth, dPolar } = externalOrbitRef.current;
+    if (dAzimuth === 0 && dPolar === 0) return;
+    const target = controls ? controls.target : new THREE.Vector3(0, 0, 0);
+    const offset = camera.position.clone().sub(target);
+    const radius = offset.length();
+    if (radius < 1e-6) return;
+    let azimuth = Math.atan2(offset.x, offset.z);
+    let polar = Math.acos(THREE.MathUtils.clamp(offset.y / radius, -1, 1));
+    azimuth += dAzimuth;
+    polar = THREE.MathUtils.clamp(polar + dPolar, 0.1, Math.PI - 0.1);
+    offset.set(
+      radius * Math.sin(polar) * Math.sin(azimuth),
+      radius * Math.cos(polar),
+      radius * Math.sin(polar) * Math.cos(azimuth),
+    );
+    camera.position.copy(target).add(offset);
+    camera.lookAt(target);
+    if (controls) controls.update();
+  });
+
   return null;
 }
 
@@ -159,14 +200,24 @@ export interface GeoProps {
 }
 
 export function MeshGeometry({ data, color, opacity, transparent }: GeoProps) {
+  // Empty `faces` is the point-cloud sentinel (forge_net's autocook path
+  // pushes the raw tracked point cloud with no triangulation -- real
+  // meshing only happens via the separate "Mesh selected" action). With a
+  // real triangle mesh, `setIndex([])` + `computeVertexNormals()` on zero
+  // triangles renders nothing at all, so this needs its own branch, not a
+  // degenerate case of the mesh path below.
+  const isPointCloud = data.faces.length === 0;
+
   const geometry = useMemo(() => {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute(
       "position",
       new THREE.BufferAttribute(new Float32Array(data.vertices.flat()), 3),
     );
-    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(data.faces.flat()), 1));
-    geo.computeVertexNormals();
+    if (!isPointCloud) {
+      geo.setIndex(new THREE.BufferAttribute(new Uint32Array(data.faces.flat()), 1));
+      geo.computeVertexNormals();
+    }
     if (data.colors) {
       geo.setAttribute(
         "color",
@@ -174,7 +225,23 @@ export function MeshGeometry({ data, color, opacity, transparent }: GeoProps) {
       );
     }
     return geo;
-  }, [data]);
+  }, [data, isPointCloud]);
+
+  if (isPointCloud) {
+    return (
+      <points geometry={geometry}>
+        <pointsMaterial
+          vertexColors={!!data.colors}
+          color={data.colors ? undefined : color}
+          size={0.6}
+          sizeAttenuation
+          transparent={transparent}
+          opacity={opacity}
+          depthWrite={!transparent}
+        />
+      </points>
+    );
+  }
 
   return (
     <mesh geometry={geometry}>
@@ -211,7 +278,7 @@ function sampleFrames(frames: MeshData[], n: number): MeshData[] {
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
-export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, cameraState }: Props) {
+export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, cameraState, externalOrbitRef }: Props) {
   const entries = useTagData(run, tag);
 
   // Dedupe by step, keeping the LAST occurrence -- a `replace=True` push
@@ -240,6 +307,11 @@ export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, c
   const [overlayAll, setOverlay] = useState(false);
   const intervalRef   = useRef<ReturnType<typeof setInterval> | null>(null);
   const userScrubbing = useRef(false);
+  // Unique per MeshPanel instance -- multiple can be mounted at once
+  // (Dashboard's MultiPanel, this view alongside another), and a
+  // <datalist> id must be unique in the DOM for its <input list=...>
+  // reference to resolve to the RIGHT one.
+  const frameTicksId = useId();
 
   // Resolve index from step
   const frameIdx = useMemo(() => {
@@ -310,7 +382,7 @@ export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, c
           <ambientLight intensity={0.4} />
           <directionalLight position={[5, 8, 5]} intensity={1.2} castShadow />
           <directionalLight position={[-5, -3, -5]} intensity={0.3} />
-          <SceneCamera run={run} tag={tag} frame={currentFrame} cameraStateRef={cameraState} />
+          <SceneCamera run={run} tag={tag} frame={currentFrame} cameraStateRef={cameraState} externalOrbitRef={externalOrbitRef} />
 
           {overlayAll ? (
             // No <Center> in overlay — frames sit in their natural coordinate
@@ -377,8 +449,18 @@ export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, c
             const idx = Number(e.target.value);
             if (frames[idx]) setCurrentStep(frames[idx].step);
           }}
+          list={frames.length > 1 ? frameTicksId : undefined}
           className="flex-1 accent-accent"
         />
+        {/* Native tick marks, one per hit -- "which hit am I on, how many
+            total" at a glance instead of only the text readout above.
+            Native <input list> rendering is Chromium/Firefox-supported;
+            harmless no-op elsewhere (falls back to a plain slider). */}
+        {frames.length > 1 && (
+          <datalist id={frameTicksId}>
+            {frames.map((_, i) => <option key={i} value={i} />)}
+          </datalist>
+        )}
 
         <label className="flex items-center gap-1 shrink-0 cursor-pointer select-none">
           <input

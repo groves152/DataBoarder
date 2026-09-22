@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator, useDefaultLayout, useGroupRef } from "react-resizable-panels";
 import { usePipelineStore, TARGETS_RUN, TARGETS_TAG_PREFIX } from "@/stores/pipelineStore";
 import { GraphPanel } from "./GraphPanel";
@@ -11,7 +11,6 @@ import { SequenceViewToggle } from "./SequenceViewToggle";
 import { GoalOverlay } from "./GoalOverlay";
 import { SequenceTrendPanel } from "./SequenceTrendPanel";
 import { ViewportSidebar } from "./ViewportSidebar";
-import { TuningPanel } from "./TuningPanel";
 
 // Drag handle between two Panels in a Group -- headless library, no default
 // styling (see react-resizable-panels' own docs: "Use the `data-separator`
@@ -23,8 +22,6 @@ const SEPARATOR_CLASS =
   "shrink-0 bg-border hover:bg-accent/60 data-[state=dragging]:bg-accent transition-colors " +
   "data-[orientation=horizontal]:w-1 data-[orientation=horizontal]:cursor-col-resize " +
   "data-[orientation=vertical]:h-1 data-[orientation=vertical]:cursor-row-resize";
-
-type Tab = "graph" | "tuning";
 
 export function PipelineView() {
   const {
@@ -55,12 +52,6 @@ export function PipelineView() {
   // across every subsequent node switch instead of resetting.
   const cameraStateRef = useRef<CameraState | null>(null);
 
-  // "Wrap the entire graph view in a tab, and add the tuning UI as another
-  // tab in that same panel" -- Graph (GraphPanel + NodeInspector) and
-  // Tuning (TuningPanel) now share the bottom half of the view as tabs
-  // rather than the Graph pairing being the only thing shown there.
-  const [activeTab, setActiveTab] = useState<Tab>("graph");
-
   // Imperative handles for each drag-resizable Group, needed for
   // WorkspaceMenu's explicit JSON export/import (getLayout/setLayout) --
   // separate from the automatic localStorage persistence below, which
@@ -78,25 +69,6 @@ export function PipelineView() {
   const outerLayout = useDefaultLayout({ id: "pipeline-outer" });
   const meshRowLayout = useDefaultLayout({ id: "pipeline-mesh-row", panelIds: ["pv-sidebar", "pv-mesh", "pv-trend"] });
   const graphRowLayout = useDefaultLayout({ id: "pipeline-graph-row" });
-
-  // The Graph tab's own Group only exists in the DOM while that tab is
-  // active, so an imported workspace's graphRow layout can't always be
-  // applied synchronously (see WorkspaceMenu's import handler) -- this
-  // holds a layout to apply as soon as that Group next mounts.
-  const pendingGraphRowLayoutRef = useRef<Record<string, number> | null>(null);
-  const applyGraphRowLayoutWhenMounted = useCallback((layout: Record<string, number>) => {
-    if (graphRowGroupRef.current) {
-      graphRowGroupRef.current.setLayout(layout);
-    } else {
-      pendingGraphRowLayoutRef.current = layout;
-    }
-  }, [graphRowGroupRef]);
-  useEffect(() => {
-    if (activeTab === "graph" && pendingGraphRowLayoutRef.current && graphRowGroupRef.current) {
-      graphRowGroupRef.current.setLayout(pendingGraphRowLayoutRef.current);
-      pendingGraphRowLayoutRef.current = null;
-    }
-  }, [activeTab, graphRowGroupRef]);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedSchema = nodeKinds.find((k) => k.kind === selectedNode?.data.kind);
@@ -122,9 +94,16 @@ export function PipelineView() {
     // press's physical limit, snap the preview to the ACHIEVED gap instead
     // of the (impossible) requested one -- "far more clear where we will
     // actually do the strike" applies doubly once the request can't be met.
+    // Only while the slider STILL sits at the rho that produced this
+    // diagnostic, though -- otherwise a capped result from an earlier rho
+    // value stays stuck forever, ignoring every rho change since (the die
+    // preview silently stops tracking the slider until the next cook).
     const capped = Boolean(selectedDiag?.capped);
     const achievedRho = typeof selectedDiag?.achieved_rho === "number" ? selectedDiag.achieved_rho : undefined;
-    const rho = capped && achievedRho !== undefined ? achievedRho : Number(selectedNode.data.params.rho ?? p.rho.default);
+    const commandedRho = typeof selectedDiag?.commanded_rho === "number" ? selectedDiag.commanded_rho : undefined;
+    const liveRho = Number(selectedNode.data.params.rho ?? p.rho.default);
+    const stillAtCommandedRho = commandedRho === undefined || Math.abs(liveRho - commandedRho) < 1e-3;
+    const rho = capped && achievedRho !== undefined && stillAtCommandedRho ? achievedRho : liveRho;
 
     return (
       <PressPreview
@@ -177,12 +156,9 @@ export function PipelineView() {
         </button>
         <PathMenu />
         <WorkspaceMenu
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
           outerGroupRef={outerGroupRef}
           meshRowGroupRef={meshRowGroupRef}
           graphRowGroupRef={graphRowGroupRef}
-          applyGraphRowLayoutWhenMounted={applyGraphRowLayoutWhenMounted}
         />
         <SequenceViewToggle />
         <label className="flex items-center gap-1.5 ml-2 cursor-pointer select-none text-gray-400">
@@ -277,45 +253,22 @@ export function PipelineView() {
           <Separator className={SEPARATOR_CLASS} />
 
           <Panel id="pv-bottom" defaultSize="50" minSize="20">
-            <div className="h-full w-full flex flex-col">
-              <div className="flex items-center gap-1 px-2 h-7 border-b border-border shrink-0 text-xs">
-                {(["graph", "tuning"] as const).map((t) => (
-                  <button
-                    key={t}
-                    onClick={() => setActiveTab(t)}
-                    className={`px-2.5 py-1 rounded-t capitalize ${
-                      activeTab === t
-                        ? "bg-surface text-white border-b-2 border-accent"
-                        : "text-gray-500 hover:text-gray-300"
-                    }`}
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
-              <div className="flex-1 min-h-0">
-                {activeTab === "graph" ? (
-                  <Group
-                    orientation="horizontal"
-                    id="pipeline-graph-row"
-                    groupRef={graphRowGroupRef}
-                    className="h-full w-full"
-                    defaultLayout={graphRowLayout.defaultLayout}
-                    onLayoutChanged={graphRowLayout.onLayoutChanged}
-                  >
-                    <Panel id="pv-graph" defaultSize="75" minSize="30">
-                      <GraphPanel />
-                    </Panel>
-                    <Separator className={SEPARATOR_CLASS} />
-                    <Panel id="pv-inspector" defaultSize={288} minSize={220} maxSize={480} groupResizeBehavior="preserve-pixel-size">
-                      <NodeInspector />
-                    </Panel>
-                  </Group>
-                ) : (
-                  <TuningPanel />
-                )}
-              </div>
-            </div>
+            <Group
+              orientation="horizontal"
+              id="pipeline-graph-row"
+              groupRef={graphRowGroupRef}
+              className="h-full w-full"
+              defaultLayout={graphRowLayout.defaultLayout}
+              onLayoutChanged={graphRowLayout.onLayoutChanged}
+            >
+              <Panel id="pv-graph" defaultSize="75" minSize="30">
+                <GraphPanel />
+              </Panel>
+              <Separator className={SEPARATOR_CLASS} />
+              <Panel id="pv-inspector" defaultSize={288} minSize={220} maxSize={480} groupResizeBehavior="preserve-pixel-size">
+                <NodeInspector />
+              </Panel>
+            </Group>
           </Panel>
         </Group>
       </div>

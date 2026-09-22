@@ -2,8 +2,9 @@ import { useState } from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { Dashboard } from "@/components/Dashboard";
 import { PipelineView } from "@/components/PipelineView";
+import { ControllerModeView } from "@/components/ControllerModeView";
 
-type View = "dashboard" | "pipeline";
+type View = "dashboard" | "pipeline" | "controller";
 
 export default function App() {
   useWebSocket();
@@ -12,7 +13,7 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen">
       <div className="flex items-center gap-1 px-3 h-8 border-b border-border bg-panel shrink-0 text-xs">
-        {(["dashboard", "pipeline"] as View[]).map((v) => (
+        {(["dashboard", "pipeline", "controller"] as View[]).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
@@ -25,7 +26,9 @@ export default function App() {
         ))}
       </div>
       <div className="flex-1 min-h-0">
-        {view === "dashboard" ? <Dashboard /> : <PipelineView />}
+        {view === "dashboard" && <Dashboard />}
+        {view === "pipeline" && <PipelineView />}
+        {view === "controller" && <ControllerModeView />}
       </div>
     </div>
   );

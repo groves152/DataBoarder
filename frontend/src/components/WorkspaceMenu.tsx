@@ -6,29 +6,19 @@ import { RawJsonDialog } from "./RawJsonDialog";
 import type { WorkspaceJson } from "@/types/pipeline";
 
 // "Similar to how VSCode works" -- exports/imports UI/session state (render
-// toggles, active tab, panel drag-resize positions), deliberately separate
-// from PathMenu's node/edge JSON. Panel drag positions ALSO auto-persist to
+// toggles, panel drag-resize positions), deliberately separate from
+// PathMenu's node/edge JSON. Panel drag positions ALSO auto-persist to
 // localStorage on their own (see PipelineView's useDefaultLayout calls), so
 // this menu is only for the explicit "save this exact setup to a portable
 // file" / "load a setup someone else sent me" use case.
 export function WorkspaceMenu({
-  activeTab,
-  setActiveTab,
   outerGroupRef,
   meshRowGroupRef,
   graphRowGroupRef,
-  applyGraphRowLayoutWhenMounted,
 }: {
-  activeTab: "graph" | "tuning";
-  setActiveTab: (tab: "graph" | "tuning") => void;
   outerGroupRef: React.RefObject<GroupImperativeHandle | null>;
   meshRowGroupRef: React.RefObject<GroupImperativeHandle | null>;
   graphRowGroupRef: React.RefObject<GroupImperativeHandle | null>;
-  // The "Graph" tab's own Group only exists in the DOM while that tab is
-  // active, so its layout can't always be applied synchronously on import
-  // (see PipelineView's own pendingGraphRowLayoutRef) -- this callback
-  // hands off a layout to apply once that Group next mounts.
-  applyGraphRowLayoutWhenMounted: (layout: Record<string, number>) => void;
 }) {
   const snapshotAppSettings = usePipelineStore((s) => s.snapshotAppSettings);
   const applyAppSettings = usePipelineStore((s) => s.applyAppSettings);
@@ -50,7 +40,6 @@ export function WorkspaceMenu({
     const workspace: WorkspaceJson = {
       format: "databoarder_workspace/v1",
       app_settings: snapshotAppSettings(),
-      activeTab,
       layouts: {
         outer: outerGroupRef.current?.getLayout(),
         meshRow: meshRowGroupRef.current?.getLayout(),
@@ -84,14 +73,7 @@ export function WorkspaceMenu({
     if (data.app_settings) applyAppSettings(data.app_settings);
     if (data.layouts?.outer) outerGroupRef.current?.setLayout(data.layouts.outer);
     if (data.layouts?.meshRow) meshRowGroupRef.current?.setLayout(data.layouts.meshRow);
-    if (data.layouts?.graphRow) {
-      if (data.activeTab === "graph" && graphRowGroupRef.current) {
-        graphRowGroupRef.current.setLayout(data.layouts.graphRow);
-      } else {
-        applyGraphRowLayoutWhenMounted(data.layouts.graphRow);
-      }
-    }
-    if (data.activeTab) setActiveTab(data.activeTab);
+    if (data.layouts?.graphRow) graphRowGroupRef.current?.setLayout(data.layouts.graphRow);
   }
 
   return (

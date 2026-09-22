@@ -1,9 +1,12 @@
 import { usePipelineStore, PHI_SYMMETRY_PRESETS } from "@/stores/pipelineStore";
 import { ParamControl } from "./ParamControl";
+import { TuningPanel } from "./TuningPanel";
 import { formatRadiansAsPi } from "@/utils/angleFormat";
 
 // "force_correct_closure": ViewportSidebar's "Physical press limit"
-// toggle. The 4 material params: the Tuning tab (TuningPanel.tsx). Both
+// toggle. The 4 material params: embedded TuningPanel below, shown only
+// when the SELECTED node is the slab_stock root (tuning is per-chain now,
+// see pipelineStore's materialParamsForRoot/setTuningProfile). Both
 // rewrite every slab_strike node's own copy together, so neither belongs
 // in this per-node editing view.
 const GLOBALLY_CONTROLLED_PARAMS = new Set([
@@ -125,6 +128,11 @@ export function NodeInspector() {
           })}
         {!schema && (
           <div className="text-xs text-gray-500">Unknown node kind — no schema loaded.</div>
+        )}
+        {node.data.kind === "slab_stock" && (
+          <div className="border-t border-border pt-4">
+            <TuningPanel rootId={node.id} />
+          </div>
         )}
       </div>
       <div className="px-3 py-2 border-t border-border text-[11px]">

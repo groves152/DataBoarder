@@ -14,6 +14,8 @@ import type {
   PathJson, PathNodeSpec, GeneratorSchema, GraphJson, AppSettingsSnapshot, TuningProfile,
 } from "@/types/pipeline";
 
+export type ControllerModelKind = "slab" | "forge_net" | null;
+
 const MATERIAL_PARAM_KEYS = [
   "beta", "plastic_decay_ahead_mm", "plastic_decay_behind_mm", "plastic_kernel_power",
 ] as const;
@@ -87,29 +89,61 @@ function ancestorsOf(nodeId: string, edges: Edge[]): Set<string> {
   return result;
 }
 
+// All descendants of `rootId` (walking source -> target) -- the reverse of
+// ancestorsOf, used to scope a tuning-profile change to just the ONE
+// chain a slab_stock root owns, not every slab_strike in the whole graph.
+function descendantsOf(rootId: string, edges: Edge[]): Set<string> {
+  const result = new Set<string>();
+  const stack = [rootId];
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    for (const e of edges) {
+      if (e.source === cur && !result.has(e.target)) {
+        result.add(e.target);
+        stack.push(e.target);
+      }
+    }
+  }
+  return result;
+}
+
+// Walks backward from `nodeId` (target -> source) to whichever node has no
+// further incoming edge -- "the root this node's chain started from."
+// Mirrors chainTerminus's forward walk; used to find WHICH slab_stock root
+// a newly-added node should inherit its tuning from.
+function rootOf(nodeId: string, edges: Edge[]): string {
+  let current = nodeId;
+  const visited = new Set([current]);
+  for (;;) {
+    const prev = edges.find((e) => e.target === current)?.source;
+    if (!prev || visited.has(prev)) return current;
+    current = prev;
+    visited.add(current);
+  }
+}
+
 // Fills in the material/smoothing keys (beta, plastic_decay_ahead_mm,
 // plastic_decay_behind_mm, plastic_kernel_power) a loaded/imported node is
-// MISSING, using `materialDefaults` -- an older export (or one hand-built
-// before these became real params) simply won't have them in its own
-// per-step `params`, and without this, `cook()` sends the node verbatim
-// with no beta/decay/power keys at all, so the backend silently falls
-// back to `slab_strike_handler`'s OWN Python kwarg defaults (the
-// "gaussian" tuning profile's fitted values) -- completely ignoring
-// whatever `tuningProfileName`/`materialParams` the same file's own
-// `app_settings` says should apply. Never overwrites a key the node's
-// own params DO already specify -- an explicit per-node value in the
-// source JSON is respected, only a genuinely absent one is filled in.
+// MISSING, falling back to that node kind's own registered schema default
+// -- an older export (or one hand-built before these became real params)
+// simply won't have them in its own per-step `params`, and without this,
+// `cook()` sends the node verbatim with no beta/decay/power keys at all,
+// so the backend silently falls back to `slab_strike_handler`'s OWN
+// Python kwarg defaults (the "gaussian" tuning profile's fitted values)
+// regardless of what tuning the rest of that chain actually uses. Never
+// overwrites a key the node's own params DO already specify -- an
+// explicit per-node value in the source JSON is respected, only a
+// genuinely absent one is filled in.
 function fillMissingMaterialParams(
   params: Record<string, ParamValue>,
   kind: string,
-  materialDefaults: Record<MaterialParamKey, number>,
   nodeKinds: NodeKindSchema[],
 ): Record<string, ParamValue> {
   const schema = nodeKinds.find((k) => k.kind === kind)?.params;
   if (!schema) return params;
   const filled = { ...params };
   for (const key of MATERIAL_PARAM_KEYS) {
-    if (!(key in filled) && key in schema) filled[key] = materialDefaults[key];
+    if (!(key in filled) && key in schema) filled[key] = schema[key].default as number;
   }
   return filled;
 }
@@ -124,8 +158,6 @@ function buildAppSettingsSnapshot(s: {
   goalName: string | null; goalVisible: boolean; goalOpacity: number; billetOpacity: number;
   showPressPreview: boolean; defaultTool: string | null; forceCorrectClosure: boolean;
   phiSymmetry: PhiSymmetry; expandedNodes: boolean;
-  materialParams: { beta: number; plastic_decay_ahead_mm: number; plastic_decay_behind_mm: number; plastic_kernel_power: number };
-  tuningProfileName: string;
 }): AppSettingsSnapshot {
   return {
     goalName: s.goalName,
@@ -137,8 +169,6 @@ function buildAppSettingsSnapshot(s: {
     forceCorrectClosure: s.forceCorrectClosure,
     phiSymmetry: s.phiSymmetry,
     expandedNodes: s.expandedNodes,
-    materialParams: s.materialParams,
-    tuningProfileName: s.tuningProfileName,
   };
 }
 
@@ -157,7 +187,6 @@ function appSettingsUpdate(settings: AppSettingsSnapshot | undefined): Record<st
   for (const key of [
     "goalName", "goalVisible", "goalOpacity", "billetOpacity", "showPressPreview",
     "defaultTool", "forceCorrectClosure", "phiSymmetry", "expandedNodes",
-    "materialParams", "tuningProfileName",
   ] as const) {
     if (settings[key] !== undefined) update[key] = settings[key];
   }
@@ -236,17 +265,16 @@ interface PipelineStore {
   // original continuous behavior.
   phiSymmetry: PhiSymmetry;
 
-  // Material/smoothing model -- GLOBAL, same pattern as
-  // forceCorrectClosure: picking a profile (or hand-adjusting one slider)
-  // rewrites every slab_strike node's own beta/plastic_decay_ahead_mm/
-  // plastic_decay_behind_mm/plastic_kernel_power together, so a whole
-  // chain always uses ONE consistent material model. `tuningProfileName`
-  // is "custom" after any hand-adjustment that no longer matches a known
-  // profile's exact values, else the matching profile's own `name`.
-  materialParams: {
-    beta: number; plastic_decay_ahead_mm: number; plastic_decay_behind_mm: number; plastic_kernel_power: number;
-  };
-  tuningProfileName: string;
+  // Material/smoothing model -- PER-CHAIN (a slab_stock root and its own
+  // reachable slab_strike descendants), not a single session-global
+  // value: gaussian tuning has no meaning for a forge_net chain, and two
+  // independent slab chains in the same graph shouldn't be forced to
+  // share one material model. Not stored directly -- every slab_strike
+  // already carries its own full copy of these 4 values (required for
+  // cook() regardless), so "the chain's current tuning" is always
+  // DERIVED by reading its first slab_strike descendant's own params (see
+  // materialParamsForRoot/tuningProfileNameForRoot below), never cached
+  // separately (nothing to go stale).
   availableTuningProfiles: TuningProfile[];
 
   // Clipboard for node(s) -- copy the current selection (single or multi),
@@ -276,13 +304,26 @@ interface PipelineStore {
   // same "multi-select falls back to single" pattern as pasteNodeParams
   // used to (now paste, see below).
   deleteSelectedNodes: () => void;
+  // Runs LSQR mesh reconstruction (server-side, against each node's own
+  // rest-mesh topology + sampling provenance) for every multi-selected
+  // forge_net node, or just selectedNodeId -- same selection-resolution
+  // pattern as deleteSelectedNodes. forge_net's own autocook only ever
+  // pushes the raw tracked point cloud (fast); this is the separate,
+  // explicit, batchable action that turns one or more of those into real
+  // triangulated meshes on demand. No-op (silently) for a slab node --
+  // the server reports it as an error entry, not a thrown exception.
+  meshSelectedNodes: () => Promise<void>;
   selectNode: (id: string | null) => void;
   // Connects `sourceId`'s output to the nearest (by canvas distance) OTHER
   // node that (a) accepts an input, (b) doesn't already have one, and (c)
   // wouldn't close a cycle. No-op if no valid target exists.
   connectNearestTarget: (sourceId: string) => void;
   setExpandedNodes: (v: boolean) => void;
-  updateNodeParam: (id: string, paramName: string, value: ParamValue) => void;
+  // autoCook (default true): false skips the debounced auto-cook -- used
+  // by controller-mode's continuous per-frame stick/key updates, which
+  // cook explicitly via an on-demand cook() call instead (see
+  // startControllerSession's docstring).
+  updateNodeParam: (id: string, paramName: string, value: ParamValue, autoCook?: boolean) => void;
   setViewSequence: (v: boolean) => void;
 
   setGoalName: (name: string | null) => void;
@@ -295,14 +336,27 @@ interface PipelineStore {
   setForceCorrectClosure: (v: boolean) => void;
   setPhiSymmetry: (v: PhiSymmetry) => void;
   fetchTuningProfiles: () => Promise<void>;
+  // Reads `rootId`'s (a slab_stock node's) CURRENT material params off its
+  // first slab_strike descendant's own copy (via descendantsOf) -- falls
+  // back to that kind's registered schema default if the chain has no
+  // strikes yet (or `rootId` isn't found), so a fresh stock with nothing
+  // chained still has a sensible value to show/seed from.
+  materialParamsForRoot: (rootId: string) => {
+    beta: number; plastic_decay_ahead_mm: number; plastic_decay_behind_mm: number; plastic_kernel_power: number;
+  };
+  // "custom" if the chain's current material params don't exactly match
+  // any known profile in availableTuningProfiles, else that profile's own
+  // `name`.
+  tuningProfileNameForRoot: (rootId: string) => string;
   // Applies a KNOWN profile's values wholesale (by name, from
-  // availableTuningProfiles) to materialParams + every slab_strike node.
-  setTuningProfile: (name: string) => void;
-  // Hand-adjusts ONE material param -- sets tuningProfileName to "custom"
-  // (no known profile matches anymore) and rewrites every node's own copy
-  // of just that key, debounced like updateNodeParam (this fires on every
+  // availableTuningProfiles) to every slab_strike descendant of `rootId`
+  // ONLY -- a different slab chain elsewhere in the same graph is
+  // untouched.
+  setTuningProfile: (rootId: string, name: string) => void;
+  // Hand-adjusts ONE material param on every slab_strike descendant of
+  // `rootId` ONLY, debounced like updateNodeParam (this fires on every
   // slider-drag tick, not just on release).
-  setMaterialParam: (key: MaterialParamKey, value: number) => void;
+  setMaterialParam: (rootId: string, key: MaterialParamKey, value: number) => void;
   // Copies the current selection (every multi-selected node, or just
   // selectedNodeId) into the clipboard.
   copyNodes: () => void;
@@ -320,6 +374,38 @@ interface PipelineStore {
   cook: () => Promise<void>;
   scheduleAutoCook: () => void;
   resetGraph: () => void;
+  // Which model controller mode is currently running (null = show the
+  // model-select screen). GLOBAL (not local component state) specifically
+  // so switching to the "pipeline" tab and back doesn't re-show the
+  // model-select screen and wipe the in-progress chain -- ControllerModeView
+  // remounting on every tab switch must NOT reset this, only an explicit
+  // "New session"/"Select model" menu action should.
+  controllerModelKind: ControllerModelKind;
+  // Bumped by every startControllerSession call (New/Restart/Select
+  // model), regardless of whether the model kind actually changed --
+  // ControllerModeView's own "keep last mesh visible" displayedNodeId
+  // state (see that component) only ever advances FORWARD onto a newly-
+  // cooked node, so on its own it never gets a signal to drop a stale id
+  // pointing at a mesh tag the session-start purge just deleted server-
+  // side. Watching this counter (rather than controllerModelKind, which
+  // doesn't change on "Restart session" with the same model) is what lets
+  // it reset that stale reference reliably every time.
+  sessionEpoch: number;
+  // Back to the model-select screen -- does NOT touch the graph itself
+  // (picking a model on that screen is what actually resets, via
+  // startControllerSession below), so an accidental press doesn't lose
+  // the current chain by itself.
+  returnToControllerModelSelect: () => void;
+  // Controller-mode's session-(re)start action: purges the server-side
+  // cooked-mesh cache for the current run/tag (same purge startControllerSession
+  // used to skip -- repeated Start presses were leaving old cooked meshes
+  // behind under ever-incrementing node ids), resets the local graph, and
+  // adds a single root stock node for the chosen model, selected. Awaits
+  // fetchNodeKinds() itself first (resetGraph fires its own fetch but
+  // doesn't await it) so addNode never runs against an empty nodeKinds --
+  // matters when this is the very first view opened this session (nothing
+  // else has fetched yet).
+  startControllerSession: (modelKind: "slab" | "forge_net") => Promise<void>;
   // Clears BOTH the local graph (nodes/edges/selection, via resetGraph)
   // AND the server's cooked-mesh buffer for this run/tag prefix -- unlike
   // resetGraph alone, which only ever touched local state (see its own
@@ -375,7 +461,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   goalName: null,
   goalVisible: true,
   goalOpacity: 0.35,
-  billetOpacity: 1.0,
+  billetOpacity: 0.5,
   availableGoals: [],
   showPressPreview: true,
   defaultTool: null,
@@ -383,13 +469,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   phiSymmetry: "free",
   copiedNodes: null,
   expandedNodes: false,
-  // Placeholder ("no tune/default" values) until fetchNodeKinds seeds it
-  // from slab_strike's own schema defaults -- tuningProfileName === ""
-  // is the "not yet seeded" sentinel (distinct from "custom", which means
-  // "seeded, but hand-adjusted away from any known profile").
-  materialParams: { beta: 0.3, plastic_decay_ahead_mm: 0, plastic_decay_behind_mm: 0, plastic_kernel_power: 2.0 },
-  tuningProfileName: "",
   availableTuningProfiles: [],
+  controllerModelKind: null,
+  sessionEpoch: 0,
 
   setRun: (run) => set({ run }),
   setTag: (tag) => set({ tag }),
@@ -436,23 +518,46 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   fetchTuningProfiles: async () => {
     const res = await fetch("/api/forge/tuning_profiles");
     const data: { profiles: TuningProfile[] } = await res.json();
-    set((s) => {
-      const update: Partial<PipelineStore> = { availableTuningProfiles: data.profiles };
-      if (s.tuningProfileName === "") {
-        const match = data.profiles.find((p) =>
-          MATERIAL_PARAM_KEYS.every((k) => Math.abs(p[k] - s.materialParams[k]) < 1e-9),
-        );
-        update.tuningProfileName = match ? match.name : "custom";
-      }
-      return update;
-    });
+    set({ availableTuningProfiles: data.profiles });
   },
 
-  // Rewrites EVERY slab_strike node's own material params to match a
-  // KNOWN profile (by name) -- same "global toggle rewrites every node"
-  // pattern as setForceCorrectClosure, so a whole chain always uses one
-  // consistent material model, not a mix.
-  setTuningProfile: (name) => {
+  materialParamsForRoot: (rootId) => {
+    const { nodes, edges, nodeKinds } = get();
+    const desc = descendantsOf(rootId, edges);
+    const strikeNode = nodes.find((n) => desc.has(n.id) && "beta" in n.data.params);
+    if (strikeNode) {
+      return {
+        beta: Number(strikeNode.data.params.beta),
+        plastic_decay_ahead_mm: Number(strikeNode.data.params.plastic_decay_ahead_mm),
+        plastic_decay_behind_mm: Number(strikeNode.data.params.plastic_decay_behind_mm),
+        plastic_kernel_power: Number(strikeNode.data.params.plastic_kernel_power),
+      };
+    }
+    // No strike chained yet -- fall back to that kind's own schema
+    // default (the same values a freshly-added slab_strike would get).
+    const schema = nodeKinds.find((k) => k.params.beta)?.params;
+    return {
+      beta: Number(schema?.beta.default ?? 0.3),
+      plastic_decay_ahead_mm: Number(schema?.plastic_decay_ahead_mm.default ?? 0),
+      plastic_decay_behind_mm: Number(schema?.plastic_decay_behind_mm.default ?? 0),
+      plastic_kernel_power: Number(schema?.plastic_kernel_power.default ?? 2.0),
+    };
+  },
+
+  tuningProfileNameForRoot: (rootId) => {
+    const params = get().materialParamsForRoot(rootId);
+    const match = get().availableTuningProfiles.find((p) =>
+      MATERIAL_PARAM_KEYS.every((k) => Math.abs(p[k] - params[k]) < 1e-9),
+    );
+    return match ? match.name : "custom";
+  },
+
+  // Rewrites every slab_strike DESCENDANT OF rootId (not the whole graph)
+  // to match a KNOWN profile (by name) -- same "toggle rewrites every
+  // node in scope" pattern as setForceCorrectClosure had, just scoped to
+  // one chain instead of the whole graph now that multiple independent
+  // model chains can coexist.
+  setTuningProfile: (rootId, name) => {
     const profile = get().availableTuningProfiles.find((p) => p.name === name);
     if (!profile) return;
     const params = {
@@ -461,11 +566,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       plastic_decay_behind_mm: profile.plastic_decay_behind_mm,
       plastic_kernel_power: profile.plastic_kernel_power,
     };
+    const desc = descendantsOf(rootId, get().edges);
     set((s) => ({
-      materialParams: params,
-      tuningProfileName: name,
       nodes: s.nodes.map((n) =>
-        "beta" in n.data.params
+        desc.has(n.id) && "beta" in n.data.params
           ? { ...n, data: { ...n.data, params: { ...n.data.params, ...params }, cooked: false } }
           : n,
       ),
@@ -473,14 +577,14 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     get().cook();
   },
 
-  // Hand-adjusts ONE material param (a Tuning-tab slider drag) -- debounced
-  // like updateNodeParam, since this fires on every tick while dragging.
-  setMaterialParam: (key, value) => {
+  // Hand-adjusts ONE material param on every slab_strike descendant of
+  // rootId -- debounced like updateNodeParam, since this fires on every
+  // tick while dragging.
+  setMaterialParam: (rootId, key, value) => {
+    const desc = descendantsOf(rootId, get().edges);
     set((s) => ({
-      materialParams: { ...s.materialParams, [key]: value },
-      tuningProfileName: "custom",
       nodes: s.nodes.map((n) =>
-        key in n.data.params
+        desc.has(n.id) && key in n.data.params
           ? { ...n, data: { ...n.data, params: { ...n.data.params, [key]: value }, cooked: false } }
           : n,
       ),
@@ -512,24 +616,6 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         const toolSpec = data.kinds.find((k) => k.params.tool)?.params.tool;
         update.defaultTool = toolSpec ? String(toolSpec.default) : null;
       }
-      // Same idea for the material/smoothing params -- seed from
-      // whichever kind has a "beta" param (currently slab_strike), only
-      // if not seeded yet (tuningProfileName === "" sentinel).
-      if (s.tuningProfileName === "") {
-        const betaSchema = data.kinds.find((k) => k.params.beta)?.params;
-        if (betaSchema) {
-          update.materialParams = {
-            beta: Number(betaSchema.beta.default),
-            plastic_decay_ahead_mm: Number(betaSchema.plastic_decay_ahead_mm.default),
-            plastic_decay_behind_mm: Number(betaSchema.plastic_decay_behind_mm.default),
-            plastic_kernel_power: Number(betaSchema.plastic_kernel_power.default),
-          };
-          // Left un-matched to a specific profile NAME here (that needs
-          // availableTuningProfiles too, which may not be loaded yet) --
-          // fetchTuningProfiles finishes the job by matching these values
-          // against the fetched list once both are available.
-        }
-      }
       return update;
     });
   },
@@ -543,6 +629,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   addNode: (kind, position, paramOverrides) => {
     const schema = get().nodeKinds.find((k) => k.kind === kind);
     if (!schema) return;
+    // Computed early (not just below, where it's used for edge-wiring) --
+    // also needed here to find WHICH chain's tuning a new beta-bearing
+    // node should inherit from.
+    const anchorId = get().selectedNodeId;
     const params: Record<string, ParamValue> = {};
     for (const [name, spec] of Object.entries(schema.params)) {
       params[name] = spec.default;
@@ -560,20 +650,23 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       // unrelated. defaultTool only affects NEW nodes (existing ones keep
       // whatever they have); forceCorrectClosure's retroactive rewrite of
       // EXISTING nodes lives in setForceCorrectClosure instead.
-      const { defaultTool, forceCorrectClosure, materialParams } = get();
+      const { defaultTool, forceCorrectClosure } = get();
       if (defaultTool !== null && "tool" in params) params["tool"] = defaultTool;
       if ("force_correct_closure" in params) params["force_correct_closure"] = forceCorrectClosure;
       // Without this, a newly-added node would fall back to the SCHEMA's
       // own static default (the "gaussian" tuning profile's fitted
       // values, baked into slab_strike_handler's kwarg defaults) even if
       // a DIFFERENT tuning profile (or a hand-adjusted "custom" one) is
-      // currently active -- silently contradicting whatever's selected in
-      // the Tuning tab. Same "global toggle, only future nodes for the
-      // non-retroactive half" pattern as defaultTool above; existing
-      // nodes are kept in sync separately by setTuningProfile/
-      // setMaterialParam's own retroactive rewrite.
+      // active on the CHAIN it's joining -- silently contradicting that
+      // chain's own slab_stock root. Seeded from the anchor's own chain
+      // root (materialParamsForRoot gracefully falls back to the schema
+      // default when there's no anchor / no strikes chained yet, so this
+      // is a no-op in that case). Existing nodes are kept in sync
+      // separately by setTuningProfile/setMaterialParam's own retroactive
+      // rewrite.
+      const seedParams = get().materialParamsForRoot(anchorId ? rootOf(anchorId, get().edges) : "");
       for (const key of MATERIAL_PARAM_KEYS) {
-        if (key in params) params[key] = materialParams[key];
+        if (key in params) params[key] = seedParams[key];
       }
       // Every new node otherwise starts at the exact same default params --
       // fine for the first of a kind, but chaining several strike nodes
@@ -609,13 +702,13 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       }
     }
     const id = nextNodeId(kind);
-    // Auto-wire onto whatever's currently selected -- but always onto that
-    // chain's TERMINUS (its last node with no outgoing edge yet), never
-    // directly onto the selected node itself if it's mid-chain, so new
-    // strikes always append to the end of a sequence rather than branching
-    // off partway through. No anchor selected -> no auto-wire (an
-    // intentionally standalone node, e.g. a fresh second chain).
-    const anchorId = get().selectedNodeId;
+    // Auto-wire onto whatever's currently selected (anchorId, computed
+    // above) -- but always onto that chain's TERMINUS (its last node with
+    // no outgoing edge yet), never directly onto the selected node itself
+    // if it's mid-chain, so new strikes always append to the end of a
+    // sequence rather than branching off partway through. No anchor
+    // selected -> no auto-wire (an intentionally standalone node, e.g. a
+    // fresh second chain).
     const newEdges: Edge[] = [];
     if (anchorId && get().nodes.some((n) => n.id === anchorId)) {
       const terminus = chainTerminus(anchorId, get().edges);
@@ -662,7 +755,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   // own state.
   selectNode: (id) => set((s) => ({ selectedNodeId: id, viewSequence: id !== null ? false : s.viewSequence })),
 
-  updateNodeParam: (id, paramName, value) => {
+  updateNodeParam: (id, paramName, value, autoCook = true) => {
     set((s) => ({
       nodes: s.nodes.map((n) =>
         n.id === id
@@ -670,7 +763,11 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           : n,
       ),
     }));
-    get().scheduleAutoCook();
+    // autoCook=false: controller-mode's per-frame stick/key updates (up to
+    // 60/sec) -- scheduling the normal debounced cook on every one of
+    // those would hammer the server; that mode calls cook() explicitly
+    // instead (Commit/Recook), same as every other call site's default.
+    if (autoCook) get().scheduleAutoCook();
   },
 
   copyNodes: () => {
@@ -835,6 +932,49 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     get().fetchNodeKinds();
   },
 
+  returnToControllerModelSelect: () => set({ controllerModelKind: null }),
+
+  startControllerSession: async (modelKind) => {
+    const { run, tag } = get();
+    await get().fetchNodeKinds();
+    get().resetGraph();
+    // See sessionEpoch's own docstring -- bumped unconditionally (even on
+    // "Restart session" with the SAME model, where controllerModelKind
+    // itself doesn't change) so ControllerModeView always gets a signal to
+    // drop its stale displayedNodeId right as the old cache is purged.
+    set((s) => ({ sessionEpoch: s.sessionEpoch + 1 }));
+    // Controller-mode sessions always LAUNCH in square strike symmetry --
+    // asked for directly; also seeds every future addNode(strike) call's
+    // own phi-cycling heuristic (see addNode) so newly added strikes land
+    // on a square-consistent angle from the start, not just once the user
+    // happens to open the menu's "Strike symmetry" cycler.
+    set({ phiSymmetry: "square" });
+    try {
+      await fetch(`/api/pipeline/${encodeURIComponent(tag)}/cache?run=${encodeURIComponent(run)}`, {
+        method: "DELETE",
+      });
+    } catch (e) {
+      console.error("Failed to clear server-side pipeline cache:", e);
+    }
+    get().addNode(`${modelKind}_stock`);
+    // Also add the first strike immediately -- a controller session used to
+    // start with just the bare billet, requiring an extra Add-strike press
+    // before there was anything to actually control. addNode auto-wires
+    // this onto the stock (its own terminus, the only node so far) and
+    // schedules a debounced auto-cook via the new edge -- cancel that timer
+    // since we cook explicitly (and immediately) right below instead.
+    get().addNode(`${modelKind}_strike`);
+    if (autoCookTimer) {
+      clearTimeout(autoCookTimer);
+      autoCookTimer = null;
+    }
+    set({ controllerModelKind: modelKind });
+    // addNode alone does NOT cook by itself for a standalone node -- without
+    // this explicit call, nothing would render until Commit. Cooking here
+    // covers both the stock and the strike in one shot.
+    await get().cook();
+  },
+
   // Unlike resetGraph alone (local-only, see its own docstring), this ALSO
   // purges the server's cooked-mesh buffer for this run/tag -- every
   // per-node mesh tag AND the "{tag}/__sequence__" history -- so cooked
@@ -852,6 +992,26 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     }
   },
 
+  meshSelectedNodes: async () => {
+    const { nodes, selectedNodeId, run, tag } = get();
+    const multiSelected = nodes.filter((n) => n.selected).map((n) => n.id);
+    const node_ids = multiSelected.length > 0 ? multiSelected : selectedNodeId ? [selectedNodeId] : [];
+    if (node_ids.length === 0) return;
+    try {
+      await fetch("/api/forge/mesh_nodes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run, tag, node_ids }),
+      });
+      // No local state change needed -- the reconstructed mesh arrives
+      // over the same WebSocket path a cook's own mesh push already uses
+      // (buffer.push with replace=True on the SAME tag), so MeshPanel
+      // upgrades from points to a real mesh in place.
+    } catch (e) {
+      console.error("Failed to mesh selected nodes:", e);
+    }
+  },
+
   loadPath: (path) => {
     if (autoCookTimer) {
       clearTimeout(autoCookTimer);
@@ -859,11 +1019,6 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     }
     const specs: PathNodeSpec[] = [path.root, ...path.steps];
     const ids = specs.map((s) => nextNodeId(s.kind));
-    // The file's OWN app_settings.materialParams if it has one (a fresh
-    // export always does), else fall back to whatever's already active in
-    // this session -- either way, every loaded node ends up with a real
-    // beta/decay/power of its own, not silently missing them.
-    const materialDefaults = path.app_settings?.materialParams ?? get().materialParams;
     const { nodeKinds } = get();
     const newNodes: Node<PipelineNodeData>[] = specs.map((spec, i) => ({
       id: ids[i],
@@ -871,7 +1026,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       position: { x: 80 + (i % 6) * 220, y: 80 + Math.floor(i / 6) * 160 },
       data: {
         kind: spec.kind,
-        params: fillMissingMaterialParams({ ...spec.params }, spec.kind, materialDefaults, nodeKinds),
+        params: fillMissingMaterialParams({ ...spec.params }, spec.kind, nodeKinds),
         cooked: false,
       },
     }));
@@ -943,7 +1098,6 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       clearTimeout(autoCookTimer);
       autoCookTimer = null;
     }
-    const materialDefaults = graph.app_settings?.materialParams ?? get().materialParams;
     const { nodeKinds } = get();
     const idMap = new Map<string, string>();
     const newNodes: Node<PipelineNodeData>[] = graph.nodes.map((n, i) => {
@@ -955,7 +1109,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         position: { x: 80 + (i % 6) * 220, y: 80 + Math.floor(i / 6) * 160 },
         data: {
           kind: n.kind,
-          params: fillMissingMaterialParams({ ...n.params }, n.kind, materialDefaults, nodeKinds),
+          params: fillMissingMaterialParams({ ...n.params }, n.kind, nodeKinds),
           cooked: false,
         },
       };

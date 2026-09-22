@@ -79,10 +79,11 @@ export interface AppSettingsSnapshot {
   forceCorrectClosure?: boolean;
   phiSymmetry?: string;
   expandedNodes?: boolean;
-  materialParams?: {
-    beta: number; plastic_decay_ahead_mm: number; plastic_decay_behind_mm: number; plastic_kernel_power: number;
-  };
-  tuningProfileName?: string;
+  // Tuning (beta/plastic_decay_*/plastic_kernel_power) is PER-CHAIN now,
+  // not a single session-global value -- it's fully recoverable from each
+  // slab_strike node's own params (which already round-trip through
+  // path/graph export/import), so there's nothing session-global left to
+  // snapshot here.
 }
 
 export interface PathJson {
@@ -129,14 +130,13 @@ export interface GraphJson {
 export type PanelLayout = Record<string, number>;
 
 // "Similar to how VSCode works" -- a separate export from the path/graph
-// JSON above: this captures UI/session state (render toggles, active tab,
-// panel drag-resize positions), never node/edge topology, so importing one
-// never touches the other and the two can be combined freely (e.g. import a
+// JSON above: this captures UI/session state (render toggles, panel
+// drag-resize positions), never node/edge topology, so importing one never
+// touches the other and the two can be combined freely (e.g. import a
 // path, then separately restore a saved workspace layout on top of it).
 export interface WorkspaceJson {
   format: "databoarder_workspace/v1";
   app_settings?: AppSettingsSnapshot;
-  activeTab?: "graph" | "tuning";
   layouts?: {
     outer?: PanelLayout;
     meshRow?: PanelLayout;

@@ -80,7 +80,7 @@ export function WorkspaceMenu({
     <div className="relative" ref={menuRef}>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:border-accent hover:text-white transition-colors"
+        className="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:border-accent hover:text-gray-100 transition-colors"
       >
         Workspace ▾
       </button>
@@ -90,13 +90,13 @@ export function WorkspaceMenu({
         <div className="absolute z-40 mt-1 w-64 rounded-md border border-border bg-panel shadow-xl py-1 text-xs">
           <button
             onClick={handleExportClick}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-white"
+            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
           >
             Export workspace (JSON)
           </button>
           <button
             onClick={handleImportClick}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-white"
+            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
           >
             Import workspace…
           </button>

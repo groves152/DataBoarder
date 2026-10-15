@@ -2,8 +2,50 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Theme tokens as "r g b" triples (Tailwind adds the alpha). Dark is the
+   default; html.light swaps them (src/theme.ts). Neutral chrome and inks from
+   the validated data-viz palette; the accent is its categorical blue. */
+:root {
+  --c-surface: 13 13 13;      /* page plane   #0d0d0d */
+  --c-panel: 26 26 25;        /* panels       #1a1a19 */
+  --c-border: 56 56 53;       /* hairlines    #383835 */
+  --c-accent: 57 135 229;     /* blue         #3987e5 */
+  --c-warn: 250 178 25;       /* status warn  #fab219 */
+  --c-info: 134 182 239;      /* blue 250     #86b6ef */
+  /* ink ramp: 50/100/200 primary -> 300 secondary -> 400..600 muted -> 700..900 surfaces */
+  --g-50: 248 247 244;
+  --g-100: 240 239 236;
+  --g-200: 228 227 222;
+  --g-300: 195 194 183;
+  --g-400: 166 165 157;
+  --g-500: 137 135 129;
+  --g-600: 104 103 98;
+  --g-700: 70 70 66;
+  --g-800: 44 44 42;
+  --g-900: 26 26 25;
+}
+
+html.light {
+  --c-surface: 249 249 247;   /* #f9f9f7 */
+  --c-panel: 252 252 251;     /* #fcfcfb */
+  --c-border: 225 224 217;    /* #e1e0d9 */
+  --c-accent: 42 120 214;     /* #2a78d6 */
+  --c-warn: 154 103 0;        /* dark amber, readable as text on light */
+  --c-info: 28 92 171;        /* blue 550  #1c5cab */
+  --g-50: 11 11 11;
+  --g-100: 11 11 11;
+  --g-200: 31 31 29;
+  --g-300: 82 81 78;
+  --g-400: 106 105 100;
+  --g-500: 137 135 129;
+  --g-600: 160 159 152;
+  --g-700: 195 194 183;
+  --g-800: 225 224 217;
+  --g-900: 240 239 236;
+}
+
 body {
-  background-color: #0f1117;
-  color: #e2e8f0;
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  background-color: rgb(var(--c-surface));
+  color: rgb(var(--g-100));
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }

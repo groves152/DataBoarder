@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CookResult:
     values: dict[str, Any] = field(default_factory=dict)
-    meshes: dict[str, tuple[Any, Any]] = field(default_factory=dict)
+    # Each node's `to_mesh` output: `(vertices, faces)`, or a dict with
+    # "vertices"/"faces" plus optional extras (see server._mesh_payload).
+    meshes: dict[str, Any] = field(default_factory=dict)
     diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Topological execution order -- callers that want to replay every
     # mesh-producing node as an ordered sequence (e.g. a "play the whole

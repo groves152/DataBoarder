@@ -3,6 +3,7 @@ import Plot from "react-plotly.js";
 import { useTagData } from "@/hooks/useTagData";
 import { ema } from "@/utils/smoothing";
 import type { ScalarData, ScalarsData, TagEntry } from "@/types";
+import { plotLayout, seriesColor, useResolvedTheme } from "@/theme";
 
 interface Props { run: string; tag: string }
 
@@ -26,18 +27,17 @@ function toSeries(entries: TagEntry[]) {
   return series;
 }
 
-const COLORS = ["#7c6af7","#f97316","#22d3ee","#4ade80","#fb7185","#facc15"];
-
 export function ScalarPanel({ run, tag }: Props) {
   const entries = useTagData(run, tag);
   const [smoothing, setSmoothing] = useState(0.6);
   const series = useMemo(() => toSeries(entries), [entries]);
+  const theme = useResolvedTheme();
 
   const traces = useMemo(() => {
     const result: Plotly.Data[] = [];
     let ci = 0;
     for (const [name, { steps, values }] of Object.entries(series)) {
-      const color = COLORS[ci++ % COLORS.length];
+      const color = seriesColor(ci++, theme);  // fixed slot order, never cycled
       const smoothed = ema(values, smoothing);
       const label = Object.keys(series).length === 1 ? tag : `${tag}/${name}`;
       if (smoothing > 0.05) {
@@ -54,19 +54,16 @@ export function ScalarPanel({ run, tag }: Props) {
       } as Plotly.Data);
     }
     return result;
-  }, [series, smoothing, tag]);
+  }, [series, smoothing, tag, theme]);
 
   return (
     <div className="flex flex-col h-full">
       <Plot
         data={traces}
         layout={{
-          paper_bgcolor: "#1a1d27", plot_bgcolor: "#1a1d27",
-          font: { color: "#e2e8f0", size: 11 },
+          ...plotLayout(theme),
           margin: { t: 8, r: 16, b: 36, l: 52 },
-          xaxis: { title: { text: "step" }, gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e" },
-          yaxis: { gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e" },
-          legend: { bgcolor: "rgba(0,0,0,0)", font: { size: 10 } },
+          xaxis: { ...(plotLayout(theme).xaxis as object), title: { text: "step" } },
           hovermode: "x unified",
           uirevision: `${run}/${tag}`,
         }}

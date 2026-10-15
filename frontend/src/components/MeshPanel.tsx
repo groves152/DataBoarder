@@ -1,9 +1,11 @@
 import { Canvas, useThree, useFrame } from "@react-three/fiber";
-import { OrbitControls, Center, GizmoHelper, GizmoViewport } from "@react-three/drei";
+import { OrbitControls, GizmoHelper, GizmoViewport } from "@react-three/drei";
 import { useMemo, useState, useEffect, useRef, useCallback, useId, type ReactNode, type MutableRefObject } from "react";
 import * as THREE from "three";
 import { useTagData } from "@/hooks/useTagData";
-import type { MeshData } from "@/types";
+import type { MeshData, MeshTool } from "@/types";
+import { colormap, colormapCss, colormapKind, type ColormapKind } from "@/utils/colormap";
+import { CHROME, useResolvedTheme, type ResolvedTheme } from "@/theme";
 
 export interface CameraState {
   position: [number, number, number];
@@ -56,9 +58,85 @@ interface Props {
   // unaffected. Doesn't fight mouse-drag OrbitControls: both just move the
   // same camera/controls.target, whichever last wrote wins that frame.
   externalOrbitRef?: MutableRefObject<{ dAzimuth: number; dPolar: number }>;
+  // Color the mesh by one of its per-vertex `fields` (absent or not carried
+  // by the shown mesh: plain color). `fieldRange` fixes the colormap range
+  // (null: fit the shown mesh). `onFieldsSeen` reports the field names the
+  // meshes carry, so a caller can offer them.
+  field?: string | null;
+  fieldRange?: [number, number] | null;
+  onFieldsSeen?: (names: string[]) => void;
+  // Draw the meshes' extra `tools` (tooling acting on the part). Default on.
+  showTools?: boolean;
 }
 
 const MAX_OVERLAY = 20;
+
+// Tooling reads as steel (darker than the part) except the copper coil;
+// translucent so the part stays the subject.
+const TOOL_STYLE: Record<ResolvedTheme, Record<string, { color: string; opacity: number }>> = {
+  dark: {
+    die: { color: "#6b7280", opacity: 0.45 }, clamp: { color: "#6b7280", opacity: 0.4 },
+    punch: { color: "#a3a9b4", opacity: 0.6 }, blade: { color: "#a3a9b4", opacity: 0.5 },
+    coil: { color: "#c8742f", opacity: 0.5 },
+  },
+  light: {
+    die: { color: "#4b5563", opacity: 0.35 }, clamp: { color: "#4b5563", opacity: 0.3 },
+    punch: { color: "#5b6270", opacity: 0.5 }, blade: { color: "#5b6270", opacity: 0.45 },
+    coil: { color: "#b5651d", opacity: 0.55 },
+  },
+};
+
+function ToolMeshes({ tools, theme }: { tools: MeshTool[]; theme: ResolvedTheme }) {
+  return (
+    <>
+      {tools.map((t, i) => {
+        const style = TOOL_STYLE[theme][t.role ?? ""] ?? TOOL_STYLE[theme].die;
+        return (
+          <MeshGeometry
+            key={i}
+            data={{ step: 0, vertices: t.vertices, faces: t.faces }}
+            color={style.color}
+            opacity={style.opacity}
+            transparent={style.opacity < 1}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+function bboxCenter(frame: MeshData): [number, number, number] {
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (const v of frame.vertices) {
+    for (let k = 0; k < 3; k++) {
+      lo[k] = Math.min(lo[k], v[k]);
+      hi[k] = Math.max(hi[k], v[k]);
+    }
+  }
+  return [0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]), 0.5 * (lo[2] + hi[2])];
+}
+
+function FieldLegend({ name, unit, lo, hi, locked, kind, theme }: {
+  name: string; unit?: string; lo: number; hi: number; locked: boolean; kind: ColormapKind; theme: ResolvedTheme;
+}) {
+  const span = Math.abs(hi - lo);
+  const fmt = (x: number) => (span >= 20 ? x.toFixed(0) : span >= 0.2 ? x.toFixed(2) : x.toPrecision(2));
+  return (
+    <div className="absolute left-2 bottom-2 z-10 pointer-events-none bg-panel/85 border border-border rounded px-2 py-1.5 text-[10px] text-gray-300 w-48">
+      <div className="flex justify-between mb-1">
+        <span className="font-semibold">{name}{unit ? ` (${unit})` : ""}</span>
+        <span className="text-gray-500">{locked ? "locked" : "auto"}</span>
+      </div>
+      <div className="h-2.5 rounded-sm" style={{ background: colormapCss(kind, theme) }} />
+      <div className="flex justify-between mt-0.5 tabular-nums text-gray-400">
+        <span>{fmt(lo)}</span>
+        <span>{fmt(0.5 * (lo + hi))}</span>
+        <span>{fmt(hi)}</span>
+      </div>
+    </div>
+  );
+}
 
 function computeAutoFitState(frame: MeshData): { camPos: [number, number, number]; dist: number } {
   let maxDist = 1;
@@ -82,16 +160,56 @@ function computeAutoFitState(frame: MeshData): { camPos: [number, number, number
 //   own "change" event (drag/pan/zoom) so the NEXT mount picks it back up.
 //   The very first-ever mount (ref still empty) still auto-fits, seeding
 //   the ref from the starting mesh -- "reasonable default, then persists."
+// Explicit "Fit" (controls bar): frame the CURRENT mesh's bounding box --
+// unlike the one-time auto-fit above, which sizes to whatever mesh came first
+// (e.g. the short stock of a forging sequence whose later stages are much
+// longer). `centered`: the mesh is drawn inside <Center>, so aim at the origin;
+// otherwise (overlay) aim at the box center.
+function fitToBox(frame: MeshData, centered: boolean): { position: [number, number, number]; target: [number, number, number]; dist: number } {
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (const v of frame.vertices) {
+    for (let k = 0; k < 3; k++) {
+      lo[k] = Math.min(lo[k], v[k]);
+      hi[k] = Math.max(hi[k], v[k]);
+    }
+  }
+  const half = Math.max(0.5 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]), 1);
+  const target: [number, number, number] = centered
+    ? [0, 0, 0]
+    : [0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]), 0.5 * (lo[2] + hi[2])];
+  const dist = half * 2.6;
+  return { position: [target[0] + dist * 0.55, target[1] + dist * 0.65, target[2] + dist * 0.55], target, dist };
+}
+
 function SceneCamera({
-  run, tag, frame, cameraStateRef, externalOrbitRef,
+  run, tag, frame, cameraStateRef, externalOrbitRef, refitKey = 0, centered = true,
 }: {
   run: string; tag: string; frame?: MeshData; cameraStateRef?: MutableRefObject<CameraState | null>;
   externalOrbitRef?: MutableRefObject<{ dAzimuth: number; dPolar: number }>;
+  refitKey?: number; centered?: boolean;
 }) {
   const { camera } = useThree();
   const controls = useThree((s) => s.controls) as ControlsLike | null;
   const appliedRef = useRef(false);
   const firedForKey = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (refitKey === 0 || !frame) return;
+    const { position, target, dist } = fitToBox(frame, centered);
+    camera.position.set(...position);
+    camera.near = Math.max(dist * 0.01, 0.01);
+    camera.far = dist * 20;
+    camera.lookAt(...target);
+    if ("updateProjectionMatrix" in camera) (camera as THREE.PerspectiveCamera).updateProjectionMatrix();
+    if (controls) {
+      controls.target.set(...target);
+      controls.update();
+    }
+    if (cameraStateRef) cameraStateRef.current = { position, target };
+    // Only on an explicit Fit click -- not when the frame or centering changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refitKey]);
 
   useEffect(() => {
     if (cameraStateRef) {
@@ -278,7 +396,11 @@ function sampleFrames(frames: MeshData[], n: number): MeshData[] {
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
 
-export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, cameraState, externalOrbitRef }: Props) {
+export function MeshPanel({
+  run, tag, overlay, onFrameChange, meshOpacity = 1, cameraState, externalOrbitRef,
+  field = null, fieldRange = null, onFieldsSeen, showTools = true,
+}: Props) {
+  const theme = useResolvedTheme();
   const entries = useTagData(run, tag);
 
   // Dedupe by step, keeping the LAST occurrence -- a `replace=True` push
@@ -305,6 +427,7 @@ export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, c
   const [playing, setPlaying]   = useState(false);
   const [fps, setFps]           = useState(5);
   const [overlayAll, setOverlay] = useState(false);
+  const [refitKey, setRefitKey] = useState(0); // bumped by the "Fit" button
   const intervalRef   = useRef<ReturnType<typeof setInterval> | null>(null);
   const userScrubbing = useRef(false);
   // Unique per MeshPanel instance -- multiple can be mounted at once
@@ -368,6 +491,54 @@ export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, c
   const overlayFrames = useMemo(() => sampleFrames(frames, MAX_OVERLAY), [frames]);
   const hasMesh = frames.length > 0;
 
+  useEffect(() => {
+    if (!onFieldsSeen) return;
+    const names = new Set<string>();
+    for (const f of frames) for (const k of Object.keys(f.fields ?? {})) names.add(k);
+    if (names.size) onFieldsSeen(Array.from(names));
+  }, [frames, onFieldsSeen]);
+
+  // The part is centered on its own bounding box (not drei <Center>, which
+  // would also count the tooling and shift the view whenever tools appear).
+  const center = useMemo(() => (currentFrame ? bboxCenter(currentFrame) : [0, 0, 0]) as [number, number, number],
+    [currentFrame]);
+
+  // Colored copy of the current frame when a field is selected and present.
+  const colored = useMemo(() => {
+    const values = field && currentFrame?.fields?.[field];
+    if (!currentFrame || !values || values.length !== currentFrame.vertices.length) return null;
+    let lo = Infinity;
+    let hi = -Infinity;
+    if (fieldRange) {
+      [lo, hi] = fieldRange;
+    } else {
+      for (const x of values) {
+        if (x < lo) lo = x;
+        if (x > hi) hi = x;
+      }
+    }
+    // A signed field (values on both sides of 0, e.g. curvature): symmetric
+    // range on a diverging map, so white means zero.
+    const diverging = lo < 0 && hi > 0;
+    if (diverging && !fieldRange) {
+      const m = Math.max(-lo, hi);
+      lo = -m;
+      hi = m;
+    }
+    if (!(hi - lo > 1e-9 * Math.max(1, Math.abs(hi)))) {
+      // a uniform field (e.g. stock straight from the furnace): mid-colormap, not black
+      const pad = Math.max(1e-6, 0.05 * Math.abs(hi));
+      lo -= pad;
+      hi += pad;
+    }
+    const span = hi - lo;
+    const kind = colormapKind(field as string, lo, hi);
+    const cmap = colormap(kind, theme);
+    // vertex colors are linear in three.js; the colormap (and legend) is sRGB
+    const colors = values.map((x) => cmap((x - lo) / span).map((c) => Math.pow(c, 2.2)));
+    return { frame: { ...currentFrame, colors }, lo, hi, kind, unit: currentFrame.field_units?.[field as string] };
+  }, [currentFrame, field, fieldRange, theme]);
+
   return (
     <div className="flex flex-col h-full bg-surface">
       {/* 3-D viewport */}
@@ -377,12 +548,17 @@ export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, c
             No mesh data yet{overlay ? " — showing press preview" : ""}
           </div>
         )}
+        {colored && !overlayAll && field && (
+          <FieldLegend name={field} unit={colored.unit} lo={colored.lo} hi={colored.hi} locked={!!fieldRange}
+                       kind={colored.kind} theme={theme} />
+        )}
         <Canvas camera={{ position: [0, 6, 4], fov: 45 }} shadows gl={{ antialias: true }}>
-          <color attach="background" args={["#0f1117"]} />
+          <color attach="background" args={[CHROME[theme].viewport]} />
           <ambientLight intensity={0.4} />
           <directionalLight position={[5, 8, 5]} intensity={1.2} castShadow />
           <directionalLight position={[-5, -3, -5]} intensity={0.3} />
-          <SceneCamera run={run} tag={tag} frame={currentFrame} cameraStateRef={cameraState} externalOrbitRef={externalOrbitRef} />
+          <SceneCamera run={run} tag={tag} frame={currentFrame} cameraStateRef={cameraState} externalOrbitRef={externalOrbitRef}
+                       refitKey={refitKey} centered={!overlayAll} />
 
           {overlayAll ? (
             // No <Center> in overlay — frames sit in their natural coordinate
@@ -401,17 +577,19 @@ export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, c
               {overlay}
             </>
           ) : currentFrame ? (
-            // Press preview rendered INSIDE the same <Center> as the mesh so
-            // it shifts together with it, not just in raw/uncentered space.
-            <Center>
+            // Press preview and tooling rendered INSIDE the same centering
+            // group as the mesh so they shift together with it.
+            <group position={[-center[0], -center[1], -center[2]]}>
               <MeshGeometry
-                data={currentFrame}
-                color="#7c6af7"
+                key={colored ? "field" : "plain"}  // vertexColors on/off needs a fresh material
+                data={colored ? colored.frame : currentFrame}
+                color={CHROME[theme].part}
                 opacity={meshOpacity}
                 transparent={meshOpacity < 1}
               />
+              {showTools && currentFrame.tools && <ToolMeshes tools={currentFrame.tools} theme={theme} />}
               {overlay}
-            </Center>
+            </group>
           ) : (
             // No cooked mesh yet -- still show the preview (uncentered; no
             // billet to reference for centering yet) so a freshly-added,
@@ -421,7 +599,7 @@ export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, c
 
           <OrbitControls makeDefault />
           <GizmoHelper alignment="bottom-right" margin={[60, 60]}>
-            <GizmoViewport axisColors={["#f97316", "#4ade80", "#60a5fa"]} labelColor="white" />
+            <GizmoViewport axisColors={["#e34948", "#008300", "#2a78d6"]} labelColor={theme === "dark" ? "white" : "black"} />
           </GizmoHelper>
         </Canvas>
       </div>
@@ -461,6 +639,14 @@ export function MeshPanel({ run, tag, overlay, onFrameChange, meshOpacity = 1, c
             {frames.map((_, i) => <option key={i} value={i} />)}
           </datalist>
         )}
+
+        <button
+          onClick={() => setRefitKey((k) => k + 1)}
+          disabled={!currentFrame}
+          title="Fit the view to the current mesh"
+          className="px-1.5 h-6 rounded hover:bg-border transition-colors text-gray-300 shrink-0 disabled:opacity-40">
+          Fit
+        </button>
 
         <label className="flex items-center gap-1 shrink-0 cursor-pointer select-none">
           <input

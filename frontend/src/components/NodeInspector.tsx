@@ -44,7 +44,7 @@ export function NodeInspector() {
             <button
               onClick={copyNodes}
               title="Copy this node's params (Ctrl/Cmd+C)"
-              className="text-[10px] px-1.5 py-1 rounded bg-surface border border-border text-gray-300 hover:border-accent hover:text-white transition-colors"
+              className="text-[10px] px-1.5 py-1 rounded bg-surface border border-border text-gray-300 hover:border-accent hover:text-gray-100 transition-colors"
             >
               Copy
             </button>
@@ -52,7 +52,7 @@ export function NodeInspector() {
               onClick={paste}
               disabled={!copiedNodes}
               title="Paste onto this node, or every multi-selected node (Ctrl/Cmd+V)"
-              className="text-[10px] px-1.5 py-1 rounded bg-surface border border-border text-gray-300 hover:border-accent hover:text-white disabled:opacity-40 disabled:hover:text-gray-300 disabled:hover:border-border transition-colors"
+              className="text-[10px] px-1.5 py-1 rounded bg-surface border border-border text-gray-300 hover:border-accent hover:text-gray-100 disabled:opacity-40 disabled:hover:text-gray-300 disabled:hover:border-border transition-colors"
             >
               Paste
             </button>

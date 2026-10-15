@@ -3,6 +3,7 @@ import Plot from "react-plotly.js";
 import { usePipelineStore } from "@/stores/pipelineStore";
 import { topologicalOrder } from "@/utils/graphOrder";
 import { useDispatchResizeOnContainerResize } from "@/utils/useDispatchResizeOnContainerResize";
+import { CHROME, plotAxis, plotLayout, seriesColor, useResolvedTheme } from "@/theme";
 
 interface Props {
   // Which step MeshPanel is CURRENTLY showing during sequence playback
@@ -34,13 +35,12 @@ const ROWS: Row[] = [
   { key: "chi_reward", label: "reward" },
 ];
 
-const COLORS = ["#7c6af7", "#f97316", "#22d3ee", "#4ade80"];
-const SELECTED_MARKER_COLOR = "#ffffff";
 
 export function SequenceTrendPanel({ playbackStep, selectedNodeId, onClose }: Props) {
   const nodes = usePipelineStore((s) => s.nodes);
   const edges = usePipelineStore((s) => s.edges);
   const diagnostics = usePipelineStore((s) => s.diagnostics);
+  const theme = useResolvedTheme();
 
   // Same topological order the server computes for "{tag}/__sequence__"
   // (graph.py's Kahn's algorithm, mirrored client-side in graphOrder.ts,
@@ -86,7 +86,7 @@ export function SequenceTrendPanel({ playbackStep, selectedNodeId, onClose }: Pr
         <button
           onClick={onClose}
           title="Hide this panel"
-          className="w-5 h-5 flex items-center justify-center rounded hover:bg-surface hover:text-white transition-colors"
+          className="w-5 h-5 flex items-center justify-center rounded hover:bg-surface hover:text-gray-100 transition-colors"
         >
           ✕
         </button>
@@ -110,8 +110,7 @@ export function SequenceTrendPanel({ playbackStep, selectedNodeId, onClose }: Pr
 
   const data: Plotly.Data[] = [];
   const layout: Partial<Plotly.Layout> = {
-    paper_bgcolor: "#1a1d27", plot_bgcolor: "#1a1d27",
-    font: { color: "#e2e8f0", size: 10 },
+    ...(plotLayout(theme, 10) as Partial<Plotly.Layout>),
     margin: { t: 8, r: 12, b: 30, l: 46 },
     showlegend: false,
     hovermode: "x unified",
@@ -124,18 +123,18 @@ export function SequenceTrendPanel({ playbackStep, selectedNodeId, onClose }: Pr
     const yKey = n1 === 1 ? "y" : `y${n1}`;
     const top = 1 - i * (rowHeight + domainGap);
     const bottom = top - rowHeight;
-    const color = COLORS[i % COLORS.length];
+    const color = seriesColor(i, theme);  // one metric per row: the row title names it
 
     (layout as Record<string, unknown>)[n1 === 1 ? "xaxis" : `xaxis${n1}`] = {
+      ...plotAxis(theme),
       domain: [0, 1], anchor: yKey,
-      gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e",
       matches: i === 0 ? undefined : "x", // zoom/pan stays synced across rows
       showticklabels: i === n - 1,
       title: i === n - 1 ? { text: "step" } : undefined,
     };
     (layout as Record<string, unknown>)[n1 === 1 ? "yaxis" : `yaxis${n1}`] = {
+      ...plotAxis(theme),
       domain: [bottom, top], anchor: xKey,
-      gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e",
       title: { text: r.unit ? `${r.label} (${r.unit})` : r.label, font: { size: 9 } },
     };
 
@@ -149,7 +148,7 @@ export function SequenceTrendPanel({ playbackStep, selectedNodeId, onClose }: Pr
       line: { color, width: 1.5 },
       marker: {
         size: series[r.key].x.map((xv) => (xv === selectedStep ? 9 : 4)),
-        color: series[r.key].x.map((xv) => (xv === selectedStep ? SELECTED_MARKER_COLOR : color)),
+        color: series[r.key].x.map((xv) => (xv === selectedStep ? CHROME[theme].surface : color)),
         line: { color, width: series[r.key].x.map((xv) => (xv === selectedStep ? 2 : 0)) },
       },
       hovertemplate: `step %{x}<br>${r.label}: %{y:.3f}<extra></extra>`,
@@ -160,7 +159,7 @@ export function SequenceTrendPanel({ playbackStep, selectedNodeId, onClose }: Pr
         type: "line",
         xref: xKey as Plotly.XAxisName, yref: `${yKey} domain` as Plotly.YAxisName,
         x0: playbackStep, x1: playbackStep, y0: 0, y1: 1,
-        line: { color: "#facc15", width: 1.5 },
+        line: { color: CHROME[theme].ink, width: 1.5, dash: "dot" },
       });
     }
   });

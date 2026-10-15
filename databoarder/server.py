@@ -14,10 +14,32 @@ from fastapi.staticfiles import StaticFiles
 
 from databoarder.buffer import DataBuffer
 from databoarder.converters import to_numpy
-from databoarder.pipeline import Graph, GeneratorRegistry, PipelineRegistry, cook
+from databoarder.pipeline import Graph, GeneratorRegistry, PipelineRegistry, TransformRegistry, cook
 from databoarder.plugins import PluginRegistry
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _mesh_payload(mesh, step: int) -> dict:
+    """A node's `to_mesh` output as a mesh entry. A `(vertices, faces)` pair,
+    or a dict with "vertices"/"faces" plus optional extras the viewer knows:
+      - "fields": {name: per-vertex values} -- scalar fields it can color by
+      - "field_units": {name: unit label}
+      - "tools": [{"vertices", "faces", "role"?}] -- extra meshes drawn with
+        the part (e.g. the tooling acting on it), in the same frame."""
+    if isinstance(mesh, dict):
+        out = {"step": step, "vertices": to_numpy(mesh["vertices"]).tolist(),
+               "faces": to_numpy(mesh["faces"]).tolist()}
+        if mesh.get("fields"):
+            out["fields"] = {k: to_numpy(v).reshape(-1).tolist() for k, v in mesh["fields"].items()}
+        if mesh.get("field_units"):
+            out["field_units"] = dict(mesh["field_units"])
+        if mesh.get("tools"):
+            out["tools"] = [{"vertices": to_numpy(t["vertices"]).tolist(), "faces": to_numpy(t["faces"]).tolist(),
+                             "role": t.get("role", "tool")} for t in mesh["tools"]]
+        return out
+    vertices, faces = mesh
+    return {"step": step, "vertices": to_numpy(vertices).tolist(), "faces": to_numpy(faces).tolist()}
 
 
 def create_app(
@@ -25,9 +47,11 @@ def create_app(
     plugins: PluginRegistry,
     pipeline_registry: PipelineRegistry | None = None,
     generator_registry: GeneratorRegistry | None = None,
+    transform_registry: TransformRegistry | None = None,
 ) -> FastAPI:
     pipeline_registry = pipeline_registry if pipeline_registry is not None else PipelineRegistry()
     generator_registry = generator_registry if generator_registry is not None else GeneratorRegistry()
+    transform_registry = transform_registry if transform_registry is not None else TransformRegistry()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -100,18 +124,15 @@ def create_app(
 
         app.state.cook_cache[(run, tag)] = result
 
-        for node_id, (vertices, faces) in result.meshes.items():
+        payloads = {node_id: _mesh_payload(mesh, 0) for node_id, mesh in result.meshes.items()}
+        for node_id, payload in payloads.items():
             node_tag = f"{tag}/{node_id}"
             # replace=True: a node's tag holds its CURRENT cooked mesh only,
             # not a growing log of every cook it's ever participated in
             # (see `DataBuffer.push`'s docstring) -- otherwise editing an
             # upstream hit and re-cooking leaves every downstream node's
             # preview mixing stale pre-edit geometry in with the new state.
-            buffer.push(run, node_tag, "mesh", {
-                "step": 0,
-                "vertices": to_numpy(vertices).tolist(),
-                "faces": to_numpy(faces).tolist(),
-            }, replace=True)
+            buffer.push(run, node_tag, "mesh", payload, replace=True)
 
         # Also push a step-indexed running history of every mesh-producing
         # node in topological order, under one dedicated tag -- lets a
@@ -125,13 +146,8 @@ def create_app(
         seq_tag = f"{tag}/__sequence__"
         mesh_order = [node_id for node_id in result.order if node_id in result.meshes]
         for i, node_id in enumerate(mesh_order):
-            vertices, faces = result.meshes[node_id]
-            buffer.push(run, seq_tag, "mesh", {
-                "step": i,
-                "node_id": node_id,
-                "vertices": to_numpy(vertices).tolist(),
-                "faces": to_numpy(faces).tolist(),
-            }, replace=(i == 0))
+            buffer.push(run, seq_tag, "mesh", {**payloads[node_id], "step": i, "node_id": node_id},
+                        replace=(i == 0))
 
         return JSONResponse({
             "ok": True,
@@ -175,6 +191,26 @@ def create_app(
         path.setdefault("format", "databoarder_path/v1")
         path.setdefault("name", name)
         return JSONResponse({"ok": True, "path": path})
+
+    # Path transforms -- rewrite the CURRENT path (same JSON shape), e.g. a
+    # domain package inserting steps the designer left out.
+    @app.get("/api/pipeline/transforms")
+    async def get_transforms() -> JSONResponse:
+        return JSONResponse({"transforms": transform_registry.schema()})
+
+    @app.post("/api/pipeline/transforms/{name}")
+    async def run_transform(name: str, request: Request) -> JSONResponse:
+        spec = transform_registry.get(name)
+        if spec is None:
+            return JSONResponse({"ok": False, "error": f"unknown transform {name!r}"}, status_code=404)
+        body = await request.json()
+        try:
+            result = await asyncio.to_thread(spec.handler, body["path"], **body.get("params", {}))
+        except (KeyError, TypeError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        path = result["path"]
+        path.setdefault("format", "databoarder_path/v1")
+        return JSONResponse({"ok": True, "path": path, "report": result.get("report", [])})
 
     # ------------------------------------------------------------------
     # WebSocket hub

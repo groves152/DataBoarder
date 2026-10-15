@@ -60,3 +60,10 @@ class GeneratorRegistry:
 
     def schema(self) -> list[dict[str, Any]]:
         return [spec.to_json() for spec in self._generators.values()]
+
+
+class TransformRegistry(GeneratorRegistry):
+    """Path transforms: name -> a handler `(path, **params) -> {"path": new
+    path, "report": [...]}` that rewrites an existing path (same path shape as
+    generators produce) -- e.g. a domain package inserting steps a designer
+    left out. Same registration API and schema as `GeneratorRegistry`."""

@@ -19,6 +19,9 @@ export function ViewportSidebar() {
     nodeKinds, defaultTool, setDefaultTool,
     forceCorrectClosure, setForceCorrectClosure,
     phiSymmetry, setPhiSymmetry,
+    meshField, setMeshField, availableFields,
+    fieldRangeLocked, setFieldRangeLocked, fieldMin, fieldMax, setFieldRange,
+    showTools, setShowTools,
   } = usePipelineStore();
 
   // Whichever registered node kind's schema has a "tool" param first --
@@ -43,7 +46,61 @@ export function ViewportSidebar() {
           <span>Press preview</span>
         </label>
 
-        <label className="flex flex-col gap-1">
+        <div className="flex flex-col gap-1.5">
+          <label className="flex flex-col gap-1">
+            <span>Color by field</span>
+            <select
+              value={meshField}
+              onChange={(e) => setMeshField(e.target.value)}
+              className="bg-surface border border-border rounded px-1.5 py-1 text-gray-200 w-full"
+            >
+              <option value="none">none (material color)</option>
+              {availableFields.map((f) => (
+                <option key={f} value={f}>{f}</option>
+              ))}
+            </select>
+          </label>
+          <label
+            className="flex items-center gap-1.5 cursor-pointer select-none"
+            title="Off: the color range fits whichever mesh is shown. On: a fixed range, so colors compare across steps."
+          >
+            <input
+              type="checkbox"
+              checked={fieldRangeLocked}
+              onChange={(e) => setFieldRangeLocked(e.target.checked)}
+              className="accent-accent"
+            />
+            <span>Lock range</span>
+          </label>
+          {fieldRangeLocked && (
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                value={fieldMin}
+                onChange={(e) => setFieldRange(Number(e.target.value), fieldMax)}
+                className="bg-surface border border-border rounded px-1 py-0.5 text-gray-200 w-full tabular-nums"
+              />
+              <span className="text-gray-600">to</span>
+              <input
+                type="number"
+                value={fieldMax}
+                onChange={(e) => setFieldRange(fieldMin, Number(e.target.value))}
+                className="bg-surface border border-border rounded px-1 py-0.5 text-gray-200 w-full tabular-nums"
+              />
+            </div>
+          )}
+          <label className="flex items-center gap-1.5 cursor-pointer select-none" title="Dies, bend die, punch, blade, induction coil">
+            <input
+              type="checkbox"
+              checked={showTools}
+              onChange={(e) => setShowTools(e.target.checked)}
+              className="accent-accent"
+            />
+            <span>Show tooling</span>
+          </label>
+        </div>
+
+        <label className="flex flex-col gap-1 border-t border-border pt-3">
           <span>Billet opacity</span>
           <input
             type="range"

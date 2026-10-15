@@ -90,13 +90,20 @@ class NodeSpec:
     # this param's request capped by a physical limit"), surfaced to the
     # frontend in the cook response.
     diagnostics: Diagnostics | None = None
+    # Optional free-form grouping the frontend may use for display (e.g.
+    # "thermal": a step that only changes temperature/time, which the graph
+    # can fold into the edge between its neighbours).
+    category: str | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "kind": self.kind,
             "inputs": list(self.inputs),
             "params": {name: spec.to_json() for name, spec in self.params.items()},
         }
+        if self.category is not None:
+            d["category"] = self.category
+        return d
 
 
 class PipelineRegistry:
@@ -111,14 +118,19 @@ class PipelineRegistry:
         to_mesh: MeshExporter | None = None,
         params: dict[str, ParamSpec] | None = None,
         diagnostics: Diagnostics | None = None,
+        category: str | None = None,
     ) -> None:
         self._nodes[kind] = NodeSpec(
             kind=kind, handler=handler, inputs=inputs, to_mesh=to_mesh, params=params or {},
-            diagnostics=diagnostics,
+            diagnostics=diagnostics, category=category,
         )
 
     def get(self, kind: str) -> NodeSpec | None:
         return self._nodes.get(kind)
+
+    def set_category(self, kind: str, category: str | None) -> None:
+        """Group an already-registered kind (see `NodeSpec.category`)."""
+        self._nodes[kind].category = category
 
     def kinds(self) -> list[str]:
         return list(self._nodes.keys())

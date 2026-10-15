@@ -86,7 +86,7 @@ function RunTabs({ onRefresh }: { onRefresh: () => void }) {
               className={`px-3 py-1 rounded text-xs transition-colors whitespace-nowrap
                 ${fullName === activeRun
                   ? "bg-accent text-white"
-                  : "text-gray-400 hover:text-white hover:bg-border"}`}>
+                  : "text-gray-400 hover:text-gray-100 hover:bg-border"}`}>
               {label}
             </button>
           ))}
@@ -95,7 +95,7 @@ function RunTabs({ onRefresh }: { onRefresh: () => void }) {
 
       <div className="flex-1" />
       <button onClick={onRefresh} title="Re-fetch all data for this run"
-        className="shrink-0 px-2 py-1 rounded text-xs text-gray-400 hover:text-white hover:bg-border transition-colors">
+        className="shrink-0 px-2 py-1 rounded text-xs text-gray-400 hover:text-gray-100 hover:bg-border transition-colors">
         ↺ Refresh
       </button>
     </div>

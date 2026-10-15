@@ -3,6 +3,8 @@ import { useWebSocket } from "@/hooks/useWebSocket";
 import { Dashboard } from "@/components/Dashboard";
 import { PipelineView } from "@/components/PipelineView";
 import { ControllerModeView } from "@/components/ControllerModeView";
+import { SettingsMenu } from "@/components/SettingsMenu";
+import "@/theme"; // applies the stored theme before first paint
 
 type View = "dashboard" | "pipeline" | "controller";
 
@@ -24,6 +26,9 @@ export default function App() {
             {v}
           </button>
         ))}
+        <div className="ml-auto">
+          <SettingsMenu />
+        </div>
       </div>
       <div className="flex-1 min-h-0">
         {view === "dashboard" && <Dashboard />}

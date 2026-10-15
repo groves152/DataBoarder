@@ -24,6 +24,9 @@ export interface NodeKindSchema {
   kind: string;
   inputs: string[];
   params: Record<string, ParamSpec>;
+  // Optional grouping from the server, e.g. "thermal": a step that only
+  // changes temperature/time, which the graph may fold into an edge.
+  category?: string;
 }
 
 export interface PipelineNodeData extends Record<string, unknown> {
@@ -153,4 +156,12 @@ export interface TuningProfile {
   plastic_decay_ahead_mm: number;
   plastic_decay_behind_mm: number;
   plastic_kernel_power: number;
+}
+
+// A path transform's result: the rewritten path plus what it changed.
+export interface TransformResponse {
+  ok: boolean;
+  path?: PathJson;
+  report?: Record<string, unknown>[];
+  error?: string;
 }

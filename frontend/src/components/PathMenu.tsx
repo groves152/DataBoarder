@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { usePipelineStore } from "@/stores/pipelineStore";
 import { GenerateDialog } from "./GenerateDialog";
+import { TransformDialog } from "./TransformDialog";
 import { PasteJsonDialog } from "./PasteJsonDialog";
 import { RawJsonDialog } from "./RawJsonDialog";
 import { isPathJson, isGraphJson } from "@/utils/pathJson";
@@ -14,11 +15,12 @@ import { isPathJson, isGraphJson } from "@/utils/pathJson";
 // multi-selected-subset persistence). Import accepts either shape.
 export function PathMenu() {
   const {
-    generatorSchemas, fetchGeneratorSchemas, loadPath, exportPath, importGraph, exportGraph, tag, nodes,
+    generatorSchemas, fetchGeneratorSchemas, transformSchemas, fetchTransformSchemas, loadPath, exportPath, importGraph, exportGraph, tag, nodes,
   } = usePipelineStore();
   const [open, setOpen] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [activeGenerator, setActiveGenerator] = useState<string | null>(null);
+  const [activeTransform, setActiveTransform] = useState<string | null>(null);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [rawJsonPreview, setRawJsonPreview] = useState<{ data: unknown; filename: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -28,7 +30,8 @@ export function PathMenu() {
 
   useEffect(() => {
     fetchGeneratorSchemas();
-  }, [fetchGeneratorSchemas]);
+    fetchTransformSchemas();
+  }, [fetchGeneratorSchemas, fetchTransformSchemas]);
 
   useEffect(() => {
     if (!open) return;
@@ -94,12 +97,13 @@ export function PathMenu() {
   }
 
   const activeSchema = generatorSchemas.find((g) => g.name === activeGenerator);
+  const activeTransformSchema = transformSchemas.find((t) => t.name === activeTransform);
 
   return (
     <div className="relative" ref={menuRef}>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:border-accent hover:text-white transition-colors"
+        className="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:border-accent hover:text-gray-100 transition-colors"
       >
         Path ▾
       </button>
@@ -109,37 +113,55 @@ export function PathMenu() {
         <div className="absolute z-40 mt-1 w-64 rounded-md border border-border bg-panel shadow-xl py-1 text-xs">
           <button
             onClick={handleImportClick}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-white"
+            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
           >
             Import file (path or graph JSON)…
           </button>
           <button
             onClick={handlePasteClick}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-white"
+            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
           >
             Paste JSON…
           </button>
           <div className="border-t border-border my-1" />
           <button
             onClick={handleExportPathClick}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-white"
+            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
             title="Only works if the graph is a single linear chain, no branches"
           >
             Export as path (JSON)
           </button>
           <button
             onClick={() => handleExportGraphClick(false)}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-white"
+            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
           >
             Export whole graph (JSON)
           </button>
           <button
             onClick={() => handleExportGraphClick(true)}
             disabled={selectedCount === 0}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-gray-300"
+            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-gray-300"
           >
             Export selection (JSON){selectedCount > 0 ? ` — ${selectedCount} node${selectedCount === 1 ? "" : "s"}` : ""}
           </button>
+          {transformSchemas.length > 0 && (
+            <>
+              <div className="border-t border-border my-1" />
+              <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">Transform this path</div>
+              {transformSchemas.map((t) => (
+                <button
+                  key={t.name}
+                  onClick={() => {
+                    setActiveTransform(t.name);
+                    setOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
+                >
+                  {t.name === "fill_heats" ? "🔥 Fill heat actions…" : `${t.name}…`}
+                </button>
+              ))}
+            </>
+          )}
           {generatorSchemas.length > 0 && (
             <>
               <div className="border-t border-border my-1" />
@@ -151,7 +173,7 @@ export function PathMenu() {
                     setActiveGenerator(g.name);
                     setOpen(false);
                   }}
-                  className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-white"
+                  className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
                 >
                   {g.name}…
                 </button>
@@ -170,6 +192,9 @@ export function PathMenu() {
         </div>
       )}
 
+      {activeTransformSchema && (
+        <TransformDialog schema={activeTransformSchema} onClose={() => setActiveTransform(null)} />
+      )}
       {activeSchema && (
         <GenerateDialog schema={activeSchema} onClose={() => setActiveGenerator(null)} />
       )}

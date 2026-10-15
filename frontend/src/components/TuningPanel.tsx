@@ -4,6 +4,7 @@ import { usePipelineStore } from "@/stores/pipelineStore";
 import { ParamControl } from "./ParamControl";
 import { sampleKernelProfile, KERNEL_PLOT_RANGE_MM } from "@/utils/gaussianKernel";
 import { useDispatchResizeOnContainerResize } from "@/utils/useDispatchResizeOnContainerResize";
+import { CHROME, plotAxis, plotLayout, seriesColor, useResolvedTheme } from "@/theme";
 
 const MATERIAL_KEYS = [
   "beta", "plastic_decay_ahead_mm", "plastic_decay_behind_mm", "plastic_kernel_power",
@@ -20,6 +21,8 @@ const MATERIAL_KEYS = [
 // existing precedent (just scoped to one chain instead of the whole
 // graph now).
 export function TuningPanel({ rootId }: { rootId: string }) {
+  const theme = useResolvedTheme();
+  const lineColor = seriesColor(0, theme);
   const {
     nodeKinds, fetchTuningProfiles, availableTuningProfiles, materialParamsForRoot, tuningProfileNameForRoot,
     setTuningProfile, setMaterialParam,
@@ -97,8 +100,8 @@ export function TuningPanel({ rootId }: { rootId: string }) {
             data={[
               {
                 x, y, type: "scatter", mode: "lines",
-                line: { color: "#7c6af7", width: 2 },
-                fill: "tozeroy", fillcolor: "rgba(124,106,247,0.15)",
+                line: { color: lineColor, width: 2 },
+                fill: "tozeroy", fillcolor: `${lineColor}26`,
                 hovertemplate: "distance %{x:.1f}mm<br>weight %{y:.3f}<extra></extra>",
                 name: "kernel weight",
                 showlegend: false,
@@ -110,28 +113,23 @@ export function TuningPanel({ rootId }: { rootId: string }) {
               // is otherwise a near-invisible single-sample spike.
               {
                 x: [0], y: [1], type: "scatter", mode: "markers",
-                marker: { color: "#facc15", size: 8, line: { color: "#1a1d27", width: 1 } },
+                marker: { color: lineColor, size: 8, line: { color: CHROME[theme].surface, width: 2 } },
                 hovertemplate: "at the strike itself: weight 1<extra></extra>",
                 showlegend: false,
               },
             ]}
             layout={{
-              paper_bgcolor: "#1a1d27", plot_bgcolor: "#1a1d27",
-              font: { color: "#e2e8f0", size: 10 },
+              ...plotLayout(theme, 10),
               margin: { t: 6, r: 10, b: 30, l: 36 },
-              xaxis: {
+              xaxis: plotAxis(theme, {
                 title: { text: "distance (mm)", font: { size: 9 } },
                 range: [-KERNEL_PLOT_RANGE_MM, KERNEL_PLOT_RANGE_MM],
-                gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e",
-              },
-              yaxis: {
-                title: { text: "weight", font: { size: 9 } },
-                range: [0, 1.05], gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e",
-              },
+              }),
+              yaxis: plotAxis(theme, { title: { text: "weight", font: { size: 9 } }, range: [0, 1.05] }),
               shapes: [
                 {
                   type: "line", x0: 0, x1: 0, y0: 0, y1: 1, xref: "x", yref: "paper",
-                  line: { color: "#4b5563", width: 1, dash: "dot" },
+                  line: { color: CHROME[theme].muted, width: 1, dash: "dot" },
                 },
                 // Shade the hard-edged side(s) instead of leaving them a
                 // blank/empty-looking region of the plot.

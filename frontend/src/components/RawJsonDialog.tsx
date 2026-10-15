@@ -45,13 +45,13 @@ export function RawJsonDialog({
         <div className="px-3 py-2 border-t border-border flex justify-end gap-2 shrink-0">
           <button
             onClick={onClose}
-            className="text-xs px-3 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors"
+            className="text-xs px-3 py-1 rounded bg-surface border border-border text-gray-300 hover:text-gray-100 transition-colors"
           >
             Close
           </button>
           <button
             onClick={() => downloadJson(data, filename)}
-            className="text-xs px-3 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors"
+            className="text-xs px-3 py-1 rounded bg-surface border border-border text-gray-300 hover:text-gray-100 transition-colors"
           >
             Download file
           </button>

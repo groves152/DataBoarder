@@ -211,6 +211,9 @@ let cookRequestId = 0;
 interface PipelineStore {
   nodeKinds: NodeKindSchema[];
   generatorSchemas: GeneratorSchema[];
+  // Path transforms (same schema shape as generators): rewrite the current path.
+  transformSchemas: GeneratorSchema[];
+  fetchTransformSchemas: () => Promise<void>;
   nodes: Node<PipelineNodeData>[];
   edges: Edge[];
   selectedNodeId: string | null;
@@ -288,6 +291,26 @@ interface PipelineStore {
   // the card (vs. just kind name + cooked-status dot) -- a single global
   // toggle, not per-node.
   expandedNodes: boolean;
+
+  // Mesh field coloring (any per-vertex field a node's mesh carries, e.g.
+  // "T_C"): "none" shows the plain material color. Range auto-fits the shown
+  // mesh unless locked (then fixed across nodes, for comparing steps).
+  meshField: string;
+  availableFields: string[];
+  fieldRangeLocked: boolean;
+  fieldMin: number;
+  fieldMax: number;
+  // Draw the tooling meshes a node carries (dies, punch, induction coil...).
+  showTools: boolean;
+  // Graph: show "thermal" steps (heating, dwell) as their own nodes; when
+  // false they fold into a flame badge on the edge between forging steps.
+  expandHeating: boolean;
+  setMeshField: (v: string) => void;
+  setAvailableFields: (names: string[]) => void;
+  setFieldRangeLocked: (v: boolean) => void;
+  setFieldRange: (lo: number, hi: number) => void;
+  setShowTools: (v: boolean) => void;
+  setExpandHeating: (v: boolean) => void;
 
   setRun: (run: string) => void;
   setTag: (tag: string) => void;
@@ -448,6 +471,7 @@ function markAllStale(nodes: Node<PipelineNodeData>[]): Node<PipelineNodeData>[]
 export const usePipelineStore = create<PipelineStore>((set, get) => ({
   nodeKinds: [],
   generatorSchemas: [],
+  transformSchemas: [],
   nodes: [],
   edges: [],
   selectedNodeId: null,
@@ -469,12 +493,28 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   phiSymmetry: "free",
   copiedNodes: null,
   expandedNodes: false,
+  meshField: "T_C",
+  availableFields: [],
+  fieldRangeLocked: false,
+  fieldMin: 600,
+  fieldMax: 1200,
+  showTools: true,
+  expandHeating: false,
   availableTuningProfiles: [],
   controllerModelKind: null,
   sessionEpoch: 0,
 
   setRun: (run) => set({ run }),
   setTag: (tag) => set({ tag }),
+  setMeshField: (v) => set({ meshField: v }),
+  setAvailableFields: (names) => set((s) => {
+    const merged = Array.from(new Set([...s.availableFields, ...names])).sort();
+    return merged.length === s.availableFields.length ? {} : { availableFields: merged };
+  }),
+  setFieldRangeLocked: (v) => set({ fieldRangeLocked: v }),
+  setFieldRange: (lo, hi) => set({ fieldMin: lo, fieldMax: hi }),
+  setShowTools: (v) => set({ showTools: v }),
+  setExpandHeating: (v) => set({ expandHeating: v }),
   setViewSequence: (v) => set({ viewSequence: v }),
 
   setGoalName: (name) => {
@@ -624,6 +664,16 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     const res = await fetch("/api/pipeline/generators");
     const data: { generators: GeneratorSchema[] } = await res.json();
     set({ generatorSchemas: data.generators });
+  },
+
+  fetchTransformSchemas: async () => {
+    try {
+      const res = await fetch("/api/pipeline/transforms");
+      const data: { transforms: GeneratorSchema[] } = await res.json();
+      set({ transformSchemas: data.transforms ?? [] });
+    } catch {
+      set({ transformSchemas: [] });  // an older server without transforms
+    }
   },
 
   addNode: (kind, position, paramOverrides) => {

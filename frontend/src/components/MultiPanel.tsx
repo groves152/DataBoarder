@@ -15,9 +15,7 @@ import { ScalarPanel } from "./ScalarPanel";
 import { HistogramPanel } from "./HistogramPanel";
 import { ImagePanel } from "./ImagePanel";
 import { MeshPanel } from "./MeshPanel";
-
-const COLORS = ["#7c6af7","#f97316","#22d3ee","#4ade80","#fb7185","#facc15",
-                 "#a78bfa","#34d399","#f472b6","#fbbf24"];
+import { plotAxis, plotLayout, seriesColor, useResolvedTheme } from "@/theme";
 
 interface Props {
   panelId: string;
@@ -58,11 +56,12 @@ function OverlayPanel({ sources, smoothing, uirev }: { sources: DataSource[]; sm
   }
 
   const allSeries = useAllSeries();
+  const theme = useResolvedTheme();
 
   const traces = useMemo(() => {
     const out: Plotly.Data[] = [];
     allSeries.forEach(({ label, steps, values }, i) => {
-      const color = COLORS[i % COLORS.length];
+      const color = seriesColor(i, theme);  // fixed slot order, never cycled
       const smoothed = ema(values, smoothing);
       if (smoothing > 0.05) {
         out.push({ x: steps, y: values, type: "scatter", mode: "lines",
@@ -73,18 +72,15 @@ function OverlayPanel({ sources, smoothing, uirev }: { sources: DataSource[]; sm
         hovertemplate: `step: %{x}<br>%{y:.4f}<extra>${label}</extra>` } as Plotly.Data);
     });
     return out;
-  }, [allSeries, smoothing]);
+  }, [allSeries, smoothing, theme]);
 
   return (
     <Plot
       data={traces}
       layout={{
-        paper_bgcolor: "#1a1d27", plot_bgcolor: "#1a1d27",
-        font: { color: "#e2e8f0", size: 11 },
+        ...plotLayout(theme),
         margin: { t: 8, r: 16, b: 36, l: 52 },
-        xaxis: { title: { text: "step" }, gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e" },
-        yaxis: { gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e" },
-        legend: { bgcolor: "rgba(0,0,0,0)", font: { size: 10 } },
+        xaxis: plotAxis(theme, { title: { text: "step" } }),
         hovermode: "x unified",
         uirevision: uirev,
       }}
@@ -120,12 +116,13 @@ function SideBySidePanel({ sources, smoothing, uirev }: { sources: DataSource[];
   // Call hooks unconditionally for each source slot
   const s0 = useSource(sources[0]);
   const s1 = useSource(sources[1] ?? sources[0]);
+  const theme = useResolvedTheme();
 
   const traces = useMemo(() => {
     const out: Plotly.Data[] = [];
     [s0, s1].forEach((seriesList, col) => {
       seriesList.forEach(({ steps, values }, si) => {
-        const color = COLORS[(col * 3 + si) % COLORS.length];
+        const color = seriesColor(col * 3 + si, theme);
         const smoothed = ema(values, smoothing);
         out.push({
           x: steps, y: smoothed, type: "scatter", mode: "lines",
@@ -137,21 +134,18 @@ function SideBySidePanel({ sources, smoothing, uirev }: { sources: DataSource[];
       });
     });
     return out;
-  }, [s0, s1, smoothing, sources]);
+  }, [s0, s1, smoothing, sources, theme]);
 
   return (
     <Plot
       data={traces}
       layout={{
-        paper_bgcolor: "#1a1d27", plot_bgcolor: "#1a1d27",
-        font: { color: "#e2e8f0", size: 11 },
+        ...plotLayout(theme),
         margin: { t: 8, r: 16, b: 40, l: 48 },
         grid: { rows: 1, columns: 2, pattern: "independent" },
-        xaxis:  { title: { text: sources[0]?.tag ?? "" }, gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e" },
-        xaxis2: { title: { text: sources[1]?.tag ?? "" }, gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e" },
-        yaxis:  { gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e" },
-        yaxis2: { gridcolor: "#2a2d3e", zerolinecolor: "#2a2d3e" },
-        legend: { bgcolor: "rgba(0,0,0,0)", font: { size: 10 } },
+        xaxis:  plotAxis(theme, { title: { text: sources[0]?.tag ?? "" } }),
+        xaxis2: plotAxis(theme, { title: { text: sources[1]?.tag ?? "" } }),
+        yaxis2: plotAxis(theme),
         uirevision: uirev,
       }}
       config={{ responsive: true, displayModeBar: false }}

@@ -17,9 +17,21 @@ export interface MeshData {
   faces: number[][];
   colors?: number[][];
   normals?: number[][];
+  // Optional per-vertex scalar fields the viewer can color by (e.g. surface
+  // temperature), with unit labels.
+  fields?: Record<string, number[]>;
+  field_units?: Record<string, string>;
+  // Optional extra meshes drawn with this one in the same frame -- e.g. the
+  // tooling acting on the part at this step (dies, punch, induction coil).
+  tools?: MeshTool[];
   // Only set on a pipeline's "{tag}/__sequence__" tag -- which graph node
   // this step's mesh came from.
   node_id?: string;
+}
+export interface MeshTool {
+  vertices: number[][];
+  faces: number[][];
+  role?: string;
 }
 export interface AnimationFrameData { frame_idx: number; png_b64?: string; shape: number[] }
 

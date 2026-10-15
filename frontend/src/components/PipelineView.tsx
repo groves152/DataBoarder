@@ -27,7 +27,12 @@ export function PipelineView() {
   const {
     run, tag, nodes, nodeKinds, setRun, setTag, selectedNodeId, cook, cooking, diagnostics, viewSequence,
     goalName, goalVisible, goalOpacity, billetOpacity, showPressPreview,
+    meshField, fieldRangeLocked, fieldMin, fieldMax, showTools, setAvailableFields,
   } = usePipelineStore();
+  const fieldRange = useMemo(
+    () => (fieldRangeLocked ? ([fieldMin, fieldMax] as [number, number]) : null),
+    [fieldRangeLocked, fieldMin, fieldMax],
+  );
   // Whichever step MeshPanel is currently showing during sequence
   // playback -- reported one-way via its onFrameChange callback, drawn as
   // a playhead line in SequenceTrendPanel. Reset whenever sequence view
@@ -227,6 +232,10 @@ export function PipelineView() {
                       onFrameChange={viewSequence ? setPlaybackStep : undefined}
                       meshOpacity={billetOpacity}
                       cameraState={cameraStateRef}
+                      field={meshField === "none" ? null : meshField}
+                      fieldRange={fieldRange}
+                      onFieldsSeen={setAvailableFields}
+                      showTools={showTools}
                     />
                   );
                 })()}

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { Dashboard } from "@/components/Dashboard";
 import { PipelineView } from "@/components/PipelineView";
+import { Toasts } from "@/components/Toasts";
 import { ControllerModeView } from "@/components/ControllerModeView";
 import { SettingsMenu } from "@/components/SettingsMenu";
 import "@/theme"; // applies the stored theme before first paint
@@ -33,6 +34,7 @@ export default function App() {
       <div className="flex-1 min-h-0">
         {view === "dashboard" && <Dashboard />}
         {view === "pipeline" && <PipelineView />}
+        <Toasts />
         {view === "controller" && <ControllerModeView />}
       </div>
     </div>

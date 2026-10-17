@@ -9,6 +9,7 @@ import {
   applyEdgeChanges,
   addEdge,
 } from "@xyflow/react";
+import { programsOf } from "@/utils/programs";
 import type {
   NodeKindSchema, PipelineNodeData, CookResponse, NodeDiagnostics, ParamValue,
   PathJson, PathNodeSpec, GeneratorSchema, GraphJson, AppSettingsSnapshot, TuningProfile,
@@ -62,6 +63,14 @@ const NO_HIERARCHY = { graphLevel: "nodes" as const, focusedProgram: null, pinne
 function nextNodeId(kind: string): string {
   nodeIdCounter += 1;
   return `${kind}_${nodeIdCounter}`;
+}
+
+// Restored nodes keep their ids ("ops_strike_12"): new ids must count on past them.
+function reserveNodeIds(ids: string[]) {
+  for (const id of ids) {
+    const m = /_(\d+)$/.exec(id);
+    if (m) nodeIdCounter = Math.max(nodeIdCounter, Number(m[1]));
+  }
 }
 
 // Walks forward from `nodeId` (source -> target) to whichever node has no
@@ -510,7 +519,20 @@ interface PipelineStore {
   // Replaces the whole graph with an arbitrary-topology graph JSON
   // (nodes+edges) -- ids are remapped to fresh session-local ids so an
   // import never collides with anything already on the canvas.
-  importGraph: (graph: GraphJson) => void;
+  // `append`: add the graph beside what's there (fresh ids, laid out) instead
+  // of replacing it; its app settings are then not applied.
+  importGraph: (graph: GraphJson, opts?: { append?: boolean }) => void;
+  // Put back a saved graph exactly (same ids and positions), replacing the
+  // current one: the autosave and the library's "Open".
+  restoreGraph: (graph: GraphJson) => void;
+  // The graph (or just `nodeIds` and the edges among them) as JSON, with
+  // positions, for saving.
+  snapshotGraph: (nodeIds?: string[]) => GraphJson;
+  // Undo / redo of graph edits (see the history section at the end).
+  canUndo: boolean;
+  canRedo: boolean;
+  undo: () => void;
+  redo: () => void;
   // Dumps the current graph (or, if `onlySelected`, just the nodes with
   // `.selected` set -- react-flow's native multi-select, box-drag or
   // ctrl/cmd+click -- plus the edges between them) as raw graph JSON.
@@ -545,6 +567,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   diagnostics: {},
   viewSequence: false,
   layoutRequest: 0,
+  canUndo: false,
+  canRedo: false,
+  undo: () => historyStep(-1),
+  redo: () => historyStep(1),
   graphLevel: "nodes",
   focusedProgram: null,
   pinnedPrograms: [],
@@ -1224,11 +1250,12 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     };
   },
 
-  importGraph: (graph) => {
+  importGraph: (graph, opts) => {
     if (autoCookTimer) {
       clearTimeout(autoCookTimer);
       autoCookTimer = null;
     }
+    const append = !!opts?.append && get().nodes.length > 0;
     const { nodeKinds } = get();
     const idMap = new Map<string, string>();
     const newNodes: Node<PipelineNodeData>[] = graph.nodes.map((n, i) => {
@@ -1242,6 +1269,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           kind: n.kind,
           params: fillMissingMaterialParams({ ...n.params }, n.kind, nodeKinds),
           cooked: false,
+          ...(n.symmetry ? { symmetry: n.symmetry } : {}),
         },
       };
     });
@@ -1252,30 +1280,45 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         source: idMap.get(e.source)!,
         target: idMap.get(e.target)!,
       }));
-    set({
-      nodes: newNodes,
-      edges: newEdges,
-      selectedNodeId: newNodes[0]?.id ?? null,
-      cookError: null,
-      diagnostics: {},
-      viewSequence: false,
-      layoutRequest: get().layoutRequest + 1,
-      ...NO_HIERARCHY,
-      ...appSettingsUpdate(graph.app_settings),
-    });
+    set(append
+      ? {
+          nodes: [...get().nodes.map((n) => (n.selected ? { ...n, selected: false } : n)), ...newNodes],
+          edges: [...get().edges, ...newEdges],
+          selectedNodeId: newNodes[0]?.id ?? null,
+          cookError: null,
+          viewSequence: false,
+          layoutRequest: get().layoutRequest + 1,
+        }
+      : {
+          nodes: newNodes,
+          edges: newEdges,
+          selectedNodeId: newNodes[0]?.id ?? null,
+          cookError: null,
+          diagnostics: {},
+          viewSequence: false,
+          layoutRequest: get().layoutRequest + 1,
+          ...NO_HIERARCHY,
+          ...appSettingsUpdate(graph.app_settings),
+        });
     get().cook();
   },
 
   exportGraph: (onlySelected) => {
+    const chosen = onlySelected ? get().nodes.filter((n) => n.selected) : get().nodes;
+    return chosen.length === 0 ? null : get().snapshotGraph(chosen.map((n) => n.id));
+  },
+
+  snapshotGraph: (nodeIds) => {
     const { nodes, edges } = get();
-    const chosenNodes = onlySelected ? nodes.filter((n) => n.selected) : nodes;
-    if (chosenNodes.length === 0) return null;
-    const chosenIds = new Set(chosenNodes.map((n) => n.id));
-    const chosenEdges = edges.filter((e) => chosenIds.has(e.source) && chosenIds.has(e.target));
+    const chosenIds = new Set(nodeIds ?? nodes.map((n) => n.id));
     return {
-      nodes: chosenNodes.map((n) => ({ id: n.id, kind: n.data.kind, params: { ...n.data.params } })),
+      nodes: nodes.filter((n) => chosenIds.has(n.id)).map((n) => ({
+        id: n.id, kind: n.data.kind, params: { ...n.data.params },
+        position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
+        ...(n.data.symmetry ? { symmetry: n.data.symmetry } : {}),
+      })),
       app_settings: buildAppSettingsSnapshot(get()),
-      edges: chosenEdges.map((e) => ({
+      edges: edges.filter((e) => chosenIds.has(e.source) && chosenIds.has(e.target)).map((e) => ({
         source: e.source,
         target: e.target,
         target_input: DEFAULT_TARGET_INPUT,
@@ -1283,6 +1326,158 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     };
   },
 
+  restoreGraph: (graph) => {
+    if (autoCookTimer) {
+      clearTimeout(autoCookTimer);
+      autoCookTimer = null;
+    }
+    const { nodeKinds } = get();
+    const nodes: Node<PipelineNodeData>[] = graph.nodes.map((n, i) => ({
+      id: n.id,
+      type: "pipelineNode",
+      position: n.position ?? { x: 80 + (i % 6) * 220, y: 80 + Math.floor(i / 6) * 160 },
+      data: {
+        kind: n.kind,
+        params: fillMissingMaterialParams({ ...n.params }, n.kind, nodeKinds),
+        cooked: false,
+        ...(n.symmetry ? { symmetry: n.symmetry } : {}),
+      },
+    }));
+    reserveNodeIds(nodes.map((n) => n.id));
+    const ids = new Set(nodes.map((n) => n.id));
+    set({
+      nodes,
+      edges: graph.edges.filter((e) => ids.has(e.source) && ids.has(e.target))
+        .map((e) => ({ id: `${e.source}->${e.target}`, source: e.source, target: e.target })),
+      selectedNodeId: null,
+      cookError: null,
+      diagnostics: {},
+      viewSequence: false,
+      ...NO_HIERARCHY,
+      ...appSettingsUpdate(graph.app_settings),
+    });
+    if (nodes.length > 0) get().cook();
+  },
+
   snapshotAppSettings: () => buildAppSettingsSnapshot(get()),
   applyAppSettings: (settings) => set(appSettingsUpdate(settings)),
 }));
+
+// --- undo / redo + autosave -----------------------------------------------------
+//
+// Every change to the graph's content (nodes, their params / symmetry /
+// positions, edges) becomes one history entry once edits pause for
+// HISTORY_PAUSE_MS, so a slider drag or a burst of edits undoes in one step;
+// a node drag records when it ends. Selection, cook state and measured sizes
+// aren't content. Each history entry also schedules the autosave of the graph
+// to the server library (databoarder/library.py), which a fresh page restores.
+
+const HISTORY_PAUSE_MS = 400;
+const HISTORY_LIMIT = 100;
+const AUTOSAVE_MS = 1500;
+export const AUTOSAVE_ID = "__autosave__";
+
+type Snapshot = { nodes: Node<PipelineNodeData>[]; edges: Edge[]; key: string };
+
+function contentKey(nodes: Node<PipelineNodeData>[], edges: Edge[]): string {
+  return JSON.stringify([
+    nodes.map((n) => [n.id, n.data.kind, n.data.params, n.data.symmetry ?? null,
+                      Math.round(n.position.x), Math.round(n.position.y)]),
+    edges.map((e) => [e.source, e.target]),
+  ]);
+}
+
+const snapshotOf = (s: { nodes: Node<PipelineNodeData>[]; edges: Edge[] }): Snapshot =>
+  ({ nodes: s.nodes, edges: s.edges, key: contentKey(s.nodes, s.edges) });
+
+let past: Snapshot[] = [];
+let future: Snapshot[] = [];
+let committed = snapshotOf(usePipelineStore.getState());
+let pendingCommit: ReturnType<typeof setTimeout> | null = null;
+let applyingHistory = false;
+let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function publishHistory() {
+  usePipelineStore.setState({ canUndo: past.length > 0, canRedo: future.length > 0 });
+}
+
+function commitHistory() {
+  if (pendingCommit) clearTimeout(pendingCommit);
+  pendingCommit = null;
+  const now = snapshotOf(usePipelineStore.getState());
+  if (now.key === committed.key) return;
+  past.push(committed);
+  if (past.length > HISTORY_LIMIT) past.shift();
+  future = [];
+  committed = now;
+  publishHistory();
+  scheduleAutosave();
+}
+
+usePipelineStore.subscribe((s, prev) => {
+  if (applyingHistory || (s.nodes === prev.nodes && s.edges === prev.edges)) return;
+  if (s.nodes.some((n) => n.dragging)) return; // a drag is one entry, recorded when it ends
+  if (pendingCommit) clearTimeout(pendingCommit);
+  pendingCommit = setTimeout(commitHistory, HISTORY_PAUSE_MS);
+});
+
+function historyStep(direction: -1 | 1) {
+  commitHistory(); // an edit still pausing becomes its own entry first
+  const target = direction < 0 ? past.pop() : future.pop();
+  if (!target) return;
+  (direction < 0 ? future : past).push(committed);
+  committed = target;
+  const { selectedNodeId } = usePipelineStore.getState();
+  applyingHistory = true;
+  usePipelineStore.setState({
+    nodes: target.nodes.map((n) => ({ ...n, selected: false, dragging: false, data: { ...n.data, cooked: false } })),
+    edges: target.edges,
+    selectedNodeId: target.nodes.some((n) => n.id === selectedNodeId) ? selectedNodeId : null,
+  });
+  applyingHistory = false;
+  publishHistory();
+  usePipelineStore.getState().scheduleAutoCook();
+  scheduleAutosave();
+}
+
+function scheduleAutosave() {
+  if (autosaveTimer) clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(() => {
+    const graph = usePipelineStore.getState().snapshotGraph();
+    fetch(`/api/library/${AUTOSAVE_ID}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "autosave", content: graph, summary: graphSummary(graph) }),
+    }).catch(() => { /* no library on this server: nothing kept */ });
+  }, AUTOSAVE_MS);
+}
+
+/** What a library list shows for a saved graph. */
+export function graphSummary(graph: GraphJson): Record<string, unknown> {
+  return {
+    nodes: graph.nodes.length,
+    programs: programsOf(graph.nodes, graph.edges).length,
+    goal: graph.app_settings?.goalName ?? null,
+  };
+}
+
+let sessionRestored = false;
+
+/** Once per page: an empty graph gets back the last session's autosave.
+ * Resolves to the number of nodes restored (0: nothing to restore). */
+export async function restoreSession(): Promise<number> {
+  if (sessionRestored) return 0;
+  sessionRestored = true;
+  if (usePipelineStore.getState().nodes.length > 0) return 0;
+  try {
+    const res = await fetch(`/api/library/${AUTOSAVE_ID}`);
+    if (!res.ok) return 0;
+    const data = await res.json();
+    const graph = data.content as GraphJson | undefined;
+    if (!graph?.nodes?.length || usePipelineStore.getState().nodes.length > 0) return 0;
+    usePipelineStore.getState().restoreGraph(graph);
+    return graph.nodes.length;
+  } catch {
+    return 0;
+  }
+}

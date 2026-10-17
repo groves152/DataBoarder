@@ -4,7 +4,7 @@
 
 type IconName =
   | "trash" | "mesh" | "reset" | "purge" | "layout" | "fit" | "zoomIn" | "zoomOut" | "selectAll"
-  | "expand" | "flame" | "programs" | "plus" | "up";
+  | "expand" | "flame" | "programs" | "plus" | "up" | "undo" | "redo";
 
 const PATHS: Record<IconName, string> = {
   trash: "M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3",
@@ -21,6 +21,8 @@ const PATHS: Record<IconName, string> = {
   programs: "M3 5h8v6H3zM13 13h8v6h-8zM7 11v4h6M17 13V9h-6",
   plus: "M12 5v14M5 12h14",
   up: "M12 19V5M5 12l7-7 7 7",
+  undo: "M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
+  redo: "M15 14l5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13",
 };
 
 export function Icon({ name, className = "w-4 h-4" }: { name: IconName; className?: string }) {

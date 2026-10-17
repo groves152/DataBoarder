@@ -1,6 +1,7 @@
 // "?" in the pipeline top bar: the mouse and keyboard shortcuts, on hover.
 const SHORTCUTS: [string, string][] = [
   ["Click a node", "show its cooked part in the viewport"],
+  ["Cmd/Ctrl + Z", "undo (Shift: redo) a graph edit"],
   ["Tab / right-click", "add a node at the pointer"],
   ["Cmd/Ctrl + A", "select every node (pointer over the graph)"],
   ["Shift-drag, Cmd/Ctrl-click", "box / multi-select"],

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator, useDefaultLayout, useGroupRef } from "react-resizable-panels";
-import { usePipelineStore, TARGETS_RUN, TARGETS_TAG_PREFIX } from "@/stores/pipelineStore";
+import { usePipelineStore, restoreSession, TARGETS_RUN, TARGETS_TAG_PREFIX } from "@/stores/pipelineStore";
+import { toast } from "@/stores/toastStore";
 import { GraphPanel } from "./GraphPanel";
 import { NodeInspector } from "./NodeInspector";
 import { MeshPanel, type CameraState } from "./MeshPanel";
@@ -13,6 +14,7 @@ import { SidePanel } from "./SidePanel";
 import { ViewportSidebar } from "./ViewportSidebar";
 import { ViewMenu } from "./ViewMenu";
 import { ShortcutsHelp } from "./ShortcutsHelp";
+import { JobsMenu } from "./JobsMenu";
 import { usePersistentFlag } from "@/hooks/usePersistentFlag";
 import { useCurrentProgram } from "@/hooks/useCurrentProgram";
 import { programLabel, sequenceTag } from "@/utils/programs";
@@ -54,6 +56,15 @@ export function PipelineView() {
   // is (re-)entered so a stale line from a previous session doesn't show
   // before the first frame reports in.
   const [playbackStep, setPlaybackStep] = useState<number | null>(null);
+  // A fresh page picks up where the last session left off (its autosave).
+  useEffect(() => {
+    void restoreSession().then((n) => {
+      if (n > 0) {
+        toast({ text: `Restored your last session (${n} nodes)`, tone: "info",
+                action: { label: "Start empty", run: () => usePipelineStore.getState().resetGraph() } });
+      }
+    });
+  }, []);
   useEffect(() => {
     if (!viewSequence) setPlaybackStep(null);
   }, [viewSequence]);
@@ -189,7 +200,8 @@ export function PipelineView() {
           { label: "Node inspector", checked: showInspector, onChange: setShowInspector },
         ]} />
         <SequenceViewToggle />
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          <JobsMenu />
           <ShortcutsHelp />
         </div>
       </div>

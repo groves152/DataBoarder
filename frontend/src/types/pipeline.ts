@@ -125,6 +125,11 @@ export interface GraphNodeJson {
   id: string;
   kind: string;
   params: Record<string, ParamValue>;
+  // UI only (never cooked): where the node sits in the graph view, and a
+  // strike's angle symmetry (PipelineNodeData.symmetry). Optional: a graph
+  // without them is laid out fresh.
+  position?: { x: number; y: number };
+  symmetry?: string;
 }
 
 export interface GraphJson {

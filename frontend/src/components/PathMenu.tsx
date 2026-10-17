@@ -5,6 +5,9 @@ import { TransformDialog } from "./TransformDialog";
 import { PasteJsonDialog } from "./PasteJsonDialog";
 import { RawJsonDialog } from "./RawJsonDialog";
 import { isPathJson, isGraphJson } from "@/utils/pathJson";
+import { useCurrentProgram } from "@/hooks/useCurrentProgram";
+import { programLabel } from "@/utils/programs";
+import { openSetupSheet } from "@/utils/setupSheet";
 import type { GeneratorSchema } from "@/types/pipeline";
 
 // Own menu structure (separate from GraphPanel's "+ node kind" toolbar):
@@ -70,7 +73,9 @@ function MenuItem({ onClick, disabled, title, children }: {
 export function PathMenu() {
   const {
     generatorSchemas, fetchGeneratorSchemas, transformSchemas, fetchTransformSchemas, loadPath, exportPath, importGraph, exportGraph, tag, nodes,
+    diagnostics, goalName,
   } = usePipelineStore();
+  const { programs, current } = useCurrentProgram();
   const [open, setOpen] = useState(false);
   const [sub, setSub] = useState<string | null>(null); // the open flyout (desktop-menu style)
   const [exportError, setExportError] = useState<string | null>(null);
@@ -180,6 +185,21 @@ export function PathMenu() {
             <MenuItem onClick={() => handleExportGraphClick(false)}>Whole graph (JSON)</MenuItem>
             <MenuItem onClick={() => handleExportGraphClick(true)} disabled={selectedCount === 0}>
               Selection (JSON){selectedCount > 0 ? ` — ${selectedCount} node${selectedCount === 1 ? "" : "s"}` : ""}
+            </MenuItem>
+            <MenuItem disabled={!current} title="A printable sheet of the program in view, for the press operator (and its CSV)"
+                      onClick={() => {
+                        if (!current) return;
+                        const byId = new Map(nodes.map((n) => [n.id, n]));
+                        const name = programLabel(current, programs.indexOf(current), (id) => {
+                          const l = byId.get(id)?.data.params.label;
+                          return typeof l === "string" && l ? l : undefined;
+                        });
+                        if (!openSetupSheet(name, goalName, current.nodeIds, byId, diagnostics)) {
+                          setExportError("The browser blocked the setup sheet's window: allow pop-ups for this page.");
+                        }
+                        setOpen(false);
+                      }}>
+              Setup sheet (program in view)…
             </MenuItem>
           </Submenu>
           {transformSchemas.length > 0 && (

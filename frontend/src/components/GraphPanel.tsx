@@ -82,6 +82,7 @@ function GraphCanvas() {
     onNodesChange, onEdgesChange, onConnect,
     copyNodes, paste, expandedNodes, setExpandedNodes, meshSelectedNodes, expandHeating, setExpandHeating,
     selectAllNodes, setNodePositions, layoutRequest, graphLevel, setGraphLevel, focusedProgram, focusProgram,
+    canUndo, canRedo, undo, redo,
   } = usePipelineStore();
   const programsLevel = graphLevel === "programs";
   const programsLevelRef = useRef(programsLevel);
@@ -143,6 +144,17 @@ function GraphCanvas() {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const target = e.target as HTMLElement | null;
+      const cmdOrCtrl = e.metaKey || e.ctrlKey;
+      // Undo / redo anywhere but in a text field (which has its own): a
+      // focused slider or checkbox still undoes graph edits.
+      const textField = target && (target.tagName === "TEXTAREA" || target.isContentEditable
+        || (target.tagName === "INPUT" && !["range", "checkbox", "radio", "button"].includes((target as HTMLInputElement).type)));
+      if (!textField && cmdOrCtrl && (e.key.toLowerCase() === "z" || (e.ctrlKey && e.key.toLowerCase() === "y"))) {
+        e.preventDefault();
+        if (e.key.toLowerCase() === "y" || e.shiftKey) redo();
+        else undo();
+        return;
+      }
       const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA");
       if (typing) return;
       // the programs level has no steps to delete / select / copy here
@@ -156,7 +168,6 @@ function GraphCanvas() {
       if (e.key === "Delete" || e.key === "Backspace") {
         deleteSelectedNodes();
       }
-      const cmdOrCtrl = e.metaKey || e.ctrlKey;
       if (cmdOrCtrl && e.key.toLowerCase() === "a" && lastPointer.current) {
         // Cmd/Ctrl+A with the pointer over the graph: select every node (elsewhere: the browser's own)
         e.preventDefault();
@@ -173,7 +184,7 @@ function GraphCanvas() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleteSelectedNodes, copyNodes, paste, openMenuAt, selectAllNodes]);
+  }, [deleteSelectedNodes, copyNodes, paste, openMenuAt, selectAllNodes, undo, redo]);
 
   // "Clean up": positions that fit the panel (utils/graphLayout), then fit the view.
   const cleanUp = useCallback(() => {
@@ -277,6 +288,9 @@ function GraphCanvas() {
             {focused && !programsLevel && (
               <IconButton icon="up" label="Up: every program as one card" onClick={() => setGraphLevel("programs")} />
             )}
+            <IconButton icon="undo" label="Undo (Cmd/Ctrl+Z)" onClick={undo} disabled={!canUndo} />
+            <IconButton icon="redo" label="Redo (Cmd/Ctrl+Shift+Z)" onClick={redo} disabled={!canRedo} />
+            <div className="h-px bg-border my-0.5" />
             <IconButton icon="selectAll" label="Select all (Cmd/Ctrl+A)" onClick={selectAllNodes}
                         disabled={nodes.length === 0 || programsLevel} />
             <IconButton icon="trash" label="Delete selected nodes (Delete)" onClick={deleteSelectedNodes} danger

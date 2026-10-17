@@ -103,6 +103,17 @@ class DataBuffer:
                 self._conn.commit()
         return matching
 
+    def remove(self, run: str, tag: str) -> bool:
+        """Deletes the one (run, tag) bucket (`clear` matches by prefix)."""
+        with self._lock:
+            if tag not in self._store.get(run, {}):
+                return False
+            del self._store[run][tag]
+            if self._conn is not None:
+                self._conn.execute("DELETE FROM entries WHERE run = ? AND tag = ?", (run, tag))
+                self._conn.commit()
+        return True
+
     def get(self, run: str, tag: str) -> list[dict[str, Any]]:
         with self._lock:
             return list(self._store.get(run, {}).get(tag, []))

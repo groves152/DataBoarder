@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from databoarder.buffer import DataBuffer
 from databoarder.converters import to_numpy
+from databoarder.library import Library, register_library_routes
 from databoarder.pipeline import Graph, GeneratorRegistry, PipelineRegistry, TransformRegistry, cook
 from databoarder.plugins import PluginRegistry
 
@@ -49,11 +50,14 @@ def create_app(
     generator_registry: GeneratorRegistry | None = None,
     transform_registry: TransformRegistry | None = None,
     extend: Callable[[FastAPI], None] | None = None,
+    library_dir: Path | None = None,
 ) -> FastAPI:
     """`extend(app)` adds a domain package's own routes. It runs after the core
     API and before the built frontend's catch-all route is mounted (Starlette
     matches routes in registration order, and the catch-all matches any path,
-    so routes added after `create_app` returns would be unreachable by GET)."""
+    so routes added after `create_app` returns would be unreachable by GET).
+    `library_dir`: where saved graphs live (`databoarder.library`); None: no
+    library routes."""
     pipeline_registry = pipeline_registry if pipeline_registry is not None else PipelineRegistry()
     generator_registry = generator_registry if generator_registry is not None else GeneratorRegistry()
     transform_registry = transform_registry if transform_registry is not None else TransformRegistry()
@@ -75,6 +79,9 @@ def create_app(
     # app.state rather than DataBoarder inventing a domain-specific route
     # for it.
     app.state.cook_cache: dict[tuple[str, str], object] = {}
+    # Cooks run on a worker thread, so the server keeps answering (job lists,
+    # the library, status polls) while one runs -- one at a time, in order.
+    cook_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # REST endpoints
@@ -123,7 +130,8 @@ def create_app(
         context = body.get("context")  # opaque, optional -- see registry.Diagnostics
         try:
             graph = Graph.from_json(body["graph"])
-            result = cook(graph, pipeline_registry, context=context)
+            async with cook_lock:
+                result = await asyncio.to_thread(cook, graph, pipeline_registry, context=context)
         except (KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
@@ -245,6 +253,9 @@ def create_app(
     # ------------------------------------------------------------------
     # Serve built frontend — mount /assets for JS/CSS, catch-all for SPA
     # ------------------------------------------------------------------
+
+    if library_dir is not None:
+        register_library_routes(app, Library(library_dir))
 
     if extend is not None:
         extend(app)

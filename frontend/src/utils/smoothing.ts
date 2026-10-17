@@ -6,7 +6,7 @@
 export function ema(values: number[], weight: number): number[] {
   if (weight <= 0) return values;
   const out: number[] = [];
-  let last = values[0];
+  let last = 0; // the bias correction assumes the average starts from zero
   let debias = 1.0;
   for (const v of values) {
     last = last * weight + v * (1 - weight);

@@ -70,3 +70,23 @@ class Graph:
         if len(order) != len(node_ids):
             raise ValueError("cycle detected in pipeline graph")
         return order
+
+    def programs(self) -> list[list[str]]:
+        """The connected components ("programs": a stock and the steps that
+        follow it), each in topological order, ordered by where each starts
+        in the whole graph's topological order."""
+        order = self.topological_order()
+        parent = {nid: nid for nid in order}
+
+        def find(a: str) -> str:
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        for e in self.edges:
+            parent[find(e.source)] = find(e.target)
+        groups: dict[str, list[str]] = {}
+        for nid in order:
+            groups.setdefault(find(nid), []).append(nid)
+        return list(groups.values())

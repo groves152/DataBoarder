@@ -6,6 +6,8 @@ import { useTagData } from "@/hooks/useTagData";
 import type { MeshData, MeshTool } from "@/types";
 import { colormap, colormapCss, colormapKind, type ColormapKind } from "@/utils/colormap";
 import { CHROME, useResolvedTheme, type ResolvedTheme } from "@/theme";
+import { GifRecorder, canvasPixels } from "@/utils/gif";
+import { IconButton } from "./icons";
 
 export interface CameraState {
   position: [number, number, number];
@@ -67,6 +69,13 @@ interface Props {
   onFieldsSeen?: (names: string[]) => void;
   // Draw the meshes' extra `tools` (tooling acting on the part). Default on.
   showTools?: boolean;
+  // The playback bar (play, scrub, overlay, FPS, GIF export). Default on;
+  // the pipeline view shows it only in sequence view.
+  transport?: boolean;
+  // The main mesh's color (default: the theme's part color).
+  color?: string;
+  // The exported GIF's file name, without ".gif" (default: from the tag).
+  exportName?: string;
 }
 
 const MAX_OVERLAY = 20;
@@ -308,6 +317,21 @@ function SceneCamera({
   return null;
 }
 
+// Hands the panel a "render now and read the pixels" function (GIF export).
+// Reading the WebGL canvas right after a render of our own works without
+// preserveDrawingBuffer. The gizmo is drawn in a separate pass, so it stays out.
+function FrameGrabber({ grabRef }: { grabRef: MutableRefObject<(() => ImageData) | null> }) {
+  const { gl, scene, camera } = useThree();
+  useEffect(() => {
+    grabRef.current = () => {
+      gl.render(scene, camera);
+      return canvasPixels(gl.domElement);
+    };
+    return () => { grabRef.current = null; };
+  }, [gl, scene, camera, grabRef]);
+  return null;
+}
+
 // ── Geometry ──────────────────────────────────────────────────────────────────
 
 export interface GeoProps {
@@ -398,7 +422,7 @@ function sampleFrames(frames: MeshData[], n: number): MeshData[] {
 
 export function MeshPanel({
   run, tag, overlay, onFrameChange, meshOpacity = 1, cameraState, externalOrbitRef,
-  field = null, fieldRange = null, onFieldsSeen, showTools = true,
+  field = null, fieldRange = null, onFieldsSeen, showTools = true, transport = true, color, exportName,
 }: Props) {
   const theme = useResolvedTheme();
   const entries = useTagData(run, tag);
@@ -488,6 +512,30 @@ export function MeshPanel({
     setPlaying((p) => !p);
   };
 
+  // GIF export: step through every frame, grab the viewport after each one
+  // is drawn, and save. `gifAt`: the frame being captured (null: idle).
+  const grabRef = useRef<(() => ImageData) | null>(null);
+  const [gifAt, setGifAt] = useState<number | null>(null);
+  const exportGif = async () => {
+    if (!grabRef.current || frames.length === 0) return;
+    setPlaying(false);
+    const back = currentStep;
+    const nextPaint = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+    const rec = new GifRecorder();
+    for (let i = 0; i < frames.length; i++) {
+      setGifAt(i);
+      setCurrentStep(frames[i].step);
+      await nextPaint();
+      await nextPaint();
+      const img = grabRef.current?.();
+      if (!img) break; // the panel went away mid-export
+      rec.add(img, i === frames.length - 1 ? 1500 : Math.round(1000 / fps)); // hold the last frame
+    }
+    setCurrentStep(back);
+    setGifAt(null);
+    rec.save(`${(exportName ?? tag.split("/")[0]).replace(/[^\w.-]+/g, "_") || "replay"}_replay.gif`);
+  };
+
   const overlayFrames = useMemo(() => sampleFrames(frames, MAX_OVERLAY), [frames]);
   const hasMesh = frames.length > 0;
 
@@ -545,9 +593,13 @@ export function MeshPanel({
       <div className="flex-1 min-h-0 relative">
         {!hasMesh && (
           <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm pointer-events-none z-10">
-            No mesh data yet{overlay ? " — showing press preview" : ""}
+            No mesh data yet
           </div>
         )}
+        <div className="absolute top-2 right-2 z-10">
+          <IconButton icon="fit" side="left" label="Fit the view to the current mesh" disabled={!currentFrame}
+                      onClick={() => setRefitKey((k) => k + 1)} />
+        </div>
         {colored && !overlayAll && field && (
           <FieldLegend name={field} unit={colored.unit} lo={colored.lo} hi={colored.hi} locked={!!fieldRange}
                        kind={colored.kind} theme={theme} />
@@ -583,7 +635,7 @@ export function MeshPanel({
               <MeshGeometry
                 key={colored ? "field" : "plain"}  // vertexColors on/off needs a fresh material
                 data={colored ? colored.frame : currentFrame}
-                color={CHROME[theme].part}
+                color={color ?? CHROME[theme].part}
                 opacity={meshOpacity}
                 transparent={meshOpacity < 1}
               />
@@ -597,6 +649,7 @@ export function MeshPanel({
             overlay
           )}
 
+          <FrameGrabber grabRef={grabRef} />
           <OrbitControls makeDefault />
           <GizmoHelper alignment="bottom-right" margin={[60, 60]}>
             <GizmoViewport axisColors={["#e34948", "#008300", "#2a78d6"]} labelColor={theme === "dark" ? "white" : "black"} />
@@ -604,7 +657,8 @@ export function MeshPanel({
         </Canvas>
       </div>
 
-      {/* Controls bar */}
+      {/* Playback bar */}
+      {transport && (
       <div className="flex items-center gap-2 px-2 py-1.5 border-t border-border bg-panel shrink-0 text-xs text-gray-400">
         <button
           onClick={togglePlay}
@@ -640,14 +694,6 @@ export function MeshPanel({
           </datalist>
         )}
 
-        <button
-          onClick={() => setRefitKey((k) => k + 1)}
-          disabled={!currentFrame}
-          title="Fit the view to the current mesh"
-          className="px-1.5 h-6 rounded hover:bg-border transition-colors text-gray-300 shrink-0 disabled:opacity-40">
-          Fit
-        </button>
-
         <label className="flex items-center gap-1 shrink-0 cursor-pointer select-none">
           <input
             type="checkbox"
@@ -665,7 +711,16 @@ export function MeshPanel({
           className="w-14 accent-accent"
         />
         <span className="w-5 text-right tabular-nums shrink-0">{fps}</span>
+
+        <button
+          onClick={exportGif}
+          disabled={frames.length < 2 || overlayAll || gifAt !== null}
+          title="Save the replay as an animated GIF (at this FPS, from the current camera)"
+          className="px-1.5 h-6 rounded border border-border hover:border-accent transition-colors text-gray-300 shrink-0 disabled:opacity-40 tabular-nums">
+          {gifAt === null ? "GIF" : `GIF ${gifAt + 1}/${frames.length}`}
+        </button>
       </div>
+      )}
     </div>
   );
 }

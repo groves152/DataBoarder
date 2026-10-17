@@ -1,7 +1,8 @@
-import { usePipelineStore, PHI_SYMMETRY_PRESETS } from "@/stores/pipelineStore";
+import { usePipelineStore, PHI_SYMMETRY_PRESETS, phiStep, type PhiSymmetry } from "@/stores/pipelineStore";
 import { ParamControl } from "./ParamControl";
 import { TuningPanel } from "./TuningPanel";
 import { formatRadiansAsPi } from "@/utils/angleFormat";
+import { useOptimizeStore } from "@/stores/optimizeStore";
 
 // "force_correct_closure": ViewportSidebar's "Physical press limit"
 // toggle. The 4 material params: embedded TuningPanel below, shown only
@@ -13,12 +14,20 @@ const GLOBALLY_CONTROLLED_PARAMS = new Set([
   "force_correct_closure", "beta", "plastic_decay_ahead_mm", "plastic_decay_behind_mm", "plastic_kernel_power",
 ]);
 
+// Button labels: the number of faces (the full name is the tooltip).
+// pi fractions, and a full turn reads "2π" (not back to 0) at the slider's end
+const formatAngle = (v: number) => (Math.abs(v - 2 * Math.PI) < 1e-6 ? "2π" : formatRadiansAsPi(v));
+
+const SYMMETRY_SHORT: Record<PhiSymmetry, string> = { free: "Free", square: "4", hex: "6", octagon: "8" };
+
 export function NodeInspector() {
   const {
-    nodes, nodeKinds, selectedNodeId, updateNodeParam, cooking, cookError, diagnostics, phiSymmetry,
+    nodes, nodeKinds, selectedNodeId, updateNodeParam, cooking, cookError, diagnostics, phiSymmetry, setNodeSymmetry,
     copiedNodes, copyNodes, paste,
   } = usePipelineStore();
   const node = nodes.find((n) => n.id === selectedNodeId);
+  const knobs = useOptimizeStore((s) => s.knobs);
+  const toggleKnob = useOptimizeStore((s) => s.toggleKnob);
 
   if (!node) {
     return (
@@ -104,26 +113,65 @@ export function NodeInspector() {
           .filter(([name]) => !GLOBALLY_CONTROLLED_PARAMS.has(name))
           .map(([name, spec]) => {
             // Still a SLIDER (a dropdown here was reported as "no fun,"
-            // and dragging beats picking from a list for fast iteration)
-            // -- a symmetry preset just overrides the slider's `step` so
-            // it snaps to evenly-spaced positions (e.g. every 90deg for
-            // "square") instead of the schema's normal 0.01rad step.
-            // min/max stay the full 0-2pi range from the schema; only the
-            // step changes, so dragging still covers the whole circle.
-            const anglesDeg = PHI_SYMMETRY_PRESETS[phiSymmetry].anglesDeg;
-            const effectiveSpec =
-              name === "phi" && anglesDeg && anglesDeg.length > 1
-                ? { ...spec, step: ((anglesDeg[1] - anglesDeg[0]) * Math.PI) / 180 }
-                : spec;
-            return (
+            // and dragging beats picking from a list for fast iteration).
+            // The node's symmetry preset makes it snap to evenly spaced
+            // stops (e.g. every pi/2 for "square"), each a labelled bullet;
+            // "free" is the schema's smooth 0.01 rad step. min/max stay the
+            // schema's full 0-2pi either way.
+            const slider = (ticks?: number[]) => (
               <ParamControl
                 key={name}
                 name={name}
-                spec={effectiveSpec}
+                spec={spec}
                 value={node.data.params[name] ?? spec.default}
                 onChange={(v) => updateNodeParam(node.id, name, v)}
-                formatValue={name === "phi" ? formatRadiansAsPi : undefined}
+                formatValue={name === "phi" ? formatAngle : undefined}
+                ticks={ticks}
               />
+            );
+            let control = slider();
+            if (name === "phi") {
+              const sym = (node.data.symmetry as PhiSymmetry | undefined) ?? phiSymmetry;
+              const step = phiStep(sym);
+              const lo = spec.min ?? 0;
+              const hi = spec.max ?? 2 * Math.PI;
+              const ticks = step === null ? undefined
+                : Array.from({ length: Math.floor((hi - lo) / step + 1e-6) + 1 }, (_, i) => lo + i * step);
+              control = (
+                <div key={name} className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-1 text-[10px]" title="Strike symmetry: the angles this strike snaps to (new strikes inherit the last pick). Each strike is two-sided, so N faces need N/2 angles.">
+                    <span className="text-gray-500 mr-1">Symmetry</span>
+                    {(Object.keys(PHI_SYMMETRY_PRESETS) as PhiSymmetry[]).map((k) => (
+                      <button
+                        key={k}
+                        onClick={() => setNodeSymmetry(node.id, k)}
+                        title={PHI_SYMMETRY_PRESETS[k].label}
+                        className={`px-1.5 py-0.5 rounded border transition-colors ${
+                          k === sym ? "bg-accent border-accent text-white" : "border-border text-gray-400 hover:border-accent"}`}
+                      >
+                        {SYMMETRY_SHORT[k]}
+                      </button>
+                    ))}
+                  </div>
+                  {slider(ticks)}
+                </div>
+              );
+            }
+            if (!spec.optimizable) return control;
+            const on = knobs.some((k) => k.nodeId === node.id && k.param === name);
+            return (
+              <div key={name} className="flex items-start gap-1.5">
+                <button
+                  onClick={() => toggleKnob(node.id, name)}
+                  title={on ? "A knob for the optimizer (click to remove)" : "Let the optimizer tune this param"}
+                  className={`mt-0.5 w-4 h-4 shrink-0 rounded-full border text-[9px] leading-none flex items-center justify-center transition-colors ${
+                    on ? "bg-accent border-accent text-white" : "border-border text-gray-500 hover:border-accent"
+                  }`}
+                >
+                  ◎
+                </button>
+                <div className="flex-1 min-w-0">{control}</div>
+              </div>
             );
           })}
         {!schema && (

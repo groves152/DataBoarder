@@ -5,7 +5,11 @@ import { ema } from "@/utils/smoothing";
 import type { ScalarData, ScalarsData, TagEntry } from "@/types";
 import { plotLayout, seriesColor, useResolvedTheme } from "@/theme";
 
-interface Props { run: string; tag: string }
+interface Props {
+  run: string;
+  tag: string;
+  shortNames?: boolean; // legend shows the series names only (the tag is evident from the context)
+}
 
 function toSeries(entries: TagEntry[]) {
   const series: Record<string, { steps: number[]; values: number[] }> = {};
@@ -27,7 +31,7 @@ function toSeries(entries: TagEntry[]) {
   return series;
 }
 
-export function ScalarPanel({ run, tag }: Props) {
+export function ScalarPanel({ run, tag, shortNames = false }: Props) {
   const entries = useTagData(run, tag);
   const [smoothing, setSmoothing] = useState(0.6);
   const series = useMemo(() => toSeries(entries), [entries]);
@@ -39,7 +43,7 @@ export function ScalarPanel({ run, tag }: Props) {
     for (const [name, { steps, values }] of Object.entries(series)) {
       const color = seriesColor(ci++, theme);  // fixed slot order, never cycled
       const smoothed = ema(values, smoothing);
-      const label = Object.keys(series).length === 1 ? tag : `${tag}/${name}`;
+      const label = shortNames ? name : Object.keys(series).length === 1 ? tag : `${tag}/${name}`;
       if (smoothing > 0.05) {
         result.push({
           x: steps, y: values, type: "scatter", mode: "lines",
@@ -54,7 +58,7 @@ export function ScalarPanel({ run, tag }: Props) {
       } as Plotly.Data);
     }
     return result;
-  }, [series, smoothing, tag, theme]);
+  }, [series, smoothing, tag, theme, shortNames]);
 
   return (
     <div className="flex flex-col h-full">

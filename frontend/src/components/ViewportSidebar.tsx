@@ -1,5 +1,5 @@
-import { usePipelineStore, PHI_SYMMETRY_PRESETS, type PhiSymmetry } from "@/stores/pipelineStore";
-import { GoalPicker } from "./GoalPicker";
+import { usePipelineStore } from "@/stores/pipelineStore";
+import { StartGoalPicker } from "./StartGoalPicker";
 
 // Render/press-config panel, left of the mesh viewport -- collapse/resize
 // is now handled by the wrapping <Panel> (react-resizable-panels: drag to
@@ -11,14 +11,13 @@ import { GoalPicker } from "./GoalPicker";
 // limit toggle (previously a per-node param, see NodeInspector's filter)
 // and a default-press-geometry picker -- pulled out specifically because
 // the toolbar was getting crowded (direct ask: "top ribbon/banner is
-// getting quite busy").
+// getting quite busy"). The start/goal picker leads; strike symmetry is set
+// per strike in the inspector.
 export function ViewportSidebar() {
   const {
-    showPressPreview, setShowPressPreview,
     billetOpacity, setBilletOpacity,
     nodeKinds, defaultTool, setDefaultTool,
     forceCorrectClosure, setForceCorrectClosure,
-    phiSymmetry, setPhiSymmetry,
     meshField, setMeshField, availableFields,
     fieldRangeLocked, setFieldRangeLocked, fieldMin, fieldMax, setFieldRange,
     showTools, setShowTools,
@@ -36,17 +35,9 @@ export function ViewportSidebar() {
       </div>
 
       <div className="flex-1 px-2.5 py-3 flex flex-col gap-4 text-xs text-gray-400">
-        <label className="flex items-center gap-1.5 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={showPressPreview}
-            onChange={(e) => setShowPressPreview(e.target.checked)}
-            className="accent-accent"
-          />
-          <span>Press preview</span>
-        </label>
+        <StartGoalPicker />
 
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1.5 border-t border-border pt-3">
           <label className="flex flex-col gap-1">
             <span>Color by field</span>
             <select
@@ -89,7 +80,8 @@ export function ViewportSidebar() {
               />
             </div>
           )}
-          <label className="flex items-center gap-1.5 cursor-pointer select-none" title="Dies, bend die, punch, blade, induction coil">
+          <label className="flex items-center gap-1.5 cursor-pointer select-none"
+                 title="Dies, bend die, punch, blade, induction coil. While a strike's settings are being edited (before it cooks), a preview of its dies.">
             <input
               type="checkbox"
               checked={showTools}
@@ -113,10 +105,6 @@ export function ViewportSidebar() {
           />
         </label>
 
-        <div className="border-t border-border pt-3">
-          <GoalPicker />
-        </div>
-
         <div className="border-t border-border pt-3 flex flex-col gap-1.5">
           <label className="flex flex-col gap-1">
             <span>Default press geometry</span>
@@ -133,25 +121,6 @@ export function ViewportSidebar() {
           </label>
           <span className="text-[10px] text-gray-600">
             Applies to newly added nodes only — each node can still override its own "Press geometry" in the inspector.
-          </span>
-        </div>
-
-        <div className="border-t border-border pt-3 flex flex-col gap-1.5">
-          <label className="flex flex-col gap-1">
-            <span>Strike symmetry</span>
-            <select
-              value={phiSymmetry}
-              onChange={(e) => setPhiSymmetry(e.target.value as PhiSymmetry)}
-              className="bg-surface border border-border rounded px-1.5 py-1 text-gray-200 w-full"
-            >
-              {(Object.entries(PHI_SYMMETRY_PRESETS) as [PhiSymmetry, { label: string }][]).map(([key, { label }]) => (
-                <option key={key} value={key}>{label}</option>
-              ))}
-            </select>
-          </label>
-          <span className="text-[10px] text-gray-600">
-            Constrains each strike's angle to evenly-spaced positions matching a target cross-section — each strike
-            is already two-sided, so N faces only needs N/2 angles.
           </span>
         </div>
 

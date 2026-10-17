@@ -49,7 +49,16 @@ export const PHI_SYMMETRY_PRESETS: Record<PhiSymmetry, { label: string; anglesDe
   octagon: { label: "Octagon (8 faces)", anglesDeg: [0, 45, 90, 135] },
 };
 
+/** The spacing (rad) between a preset's allowed angles; null for "free". */
+export function phiStep(sym: PhiSymmetry): number | null {
+  const a = PHI_SYMMETRY_PRESETS[sym]?.anglesDeg;
+  return a && a.length > 1 ? ((a[1] - a[0]) * Math.PI) / 180 : null;
+}
+
 let nodeIdCounter = 0;
+// A fresh graph: the node level, nothing dived into or pinned.
+const NO_HIERARCHY = { graphLevel: "nodes" as const, focusedProgram: null, pinnedPrograms: [] as string[] };
+
 function nextNodeId(kind: string): string {
   nodeIdCounter += 1;
   return `${kind}_${nodeIdCounter}`;
@@ -208,6 +217,34 @@ let autoCookTimer: ReturnType<typeof setTimeout> | null = null;
 // applied if its id still matches the most recent call when it resolves.
 let cookRequestId = 0;
 
+/** Node ids of a single linear chain (root first), or null if the graph
+ * branches, merges, has a cycle or disconnected nodes. */
+export function linearChain(nodes: Node<PipelineNodeData>[], edges: Edge[]): string[] | null {
+  if (nodes.length === 0) return null;
+  const incoming = new Map<string, number>();
+  const outgoingTarget = new Map<string, string>();
+  for (const n of nodes) incoming.set(n.id, 0);
+  for (const e of edges) {
+    if (!incoming.has(e.source) || !incoming.has(e.target)) return null;
+    incoming.set(e.target, (incoming.get(e.target) ?? 0) + 1);
+    if (outgoingTarget.has(e.source)) return null; // feeds more than one node
+    outgoingTarget.set(e.source, e.target);
+  }
+  const roots = nodes.filter((n) => (incoming.get(n.id) ?? 0) === 0);
+  if (roots.length !== 1 || nodes.some((n) => (incoming.get(n.id) ?? 0) > 1)) return null;
+  const chain = [roots[0].id];
+  const visited = new Set(chain);
+  let cur = roots[0].id;
+  while (outgoingTarget.has(cur)) {
+    const next = outgoingTarget.get(cur)!;
+    if (visited.has(next)) return null; // cycle
+    chain.push(next);
+    visited.add(next);
+    cur = next;
+  }
+  return chain.length === nodes.length ? chain : null; // else: disconnected node(s)
+}
+
 interface PipelineStore {
   nodeKinds: NodeKindSchema[];
   generatorSchemas: GeneratorSchema[];
@@ -265,7 +302,8 @@ interface PipelineStore {
 
   // Which discrete-angle preset new/cycled strike nodes' phi snaps to --
   // see PHI_SYMMETRY_PRESETS. "free" (default) is a no-op, preserving the
-  // original continuous behavior.
+  // original continuous behavior. Each strike node keeps its own
+  // (`data.symmetry`); this is the last one picked, which new nodes inherit.
   phiSymmetry: PhiSymmetry;
 
   // Material/smoothing model -- PER-CHAIN (a slab_stock root and its own
@@ -305,6 +343,9 @@ interface PipelineStore {
   // Graph: show "thermal" steps (heating, dwell) as their own nodes; when
   // false they fold into a flame badge on the edge between forging steps.
   expandHeating: boolean;
+  // The loaded path's metadata (e.g. which challenge it came from, an
+  // optimizer preset) -- carried into exports so it round-trips.
+  pathMetadata: Record<string, unknown> | null;
   setMeshField: (v: string) => void;
   setAvailableFields: (names: string[]) => void;
   setFieldRangeLocked: (v: boolean) => void;
@@ -327,6 +368,23 @@ interface PipelineStore {
   // same "multi-select falls back to single" pattern as pasteNodeParams
   // used to (now paste, see below).
   deleteSelectedNodes: () => void;
+  // Bumped when a whole program is loaded (loadPath / importGraph): the graph view
+  // lays it out to fit its panel once the nodes are measured.
+  layoutRequest: number;
+  // The graph's hierarchy (utils/programs: a program = a stock and its steps).
+  // "programs": one card per program; "nodes": the steps, all programs' or,
+  // once dived into (`focusedProgram`, a program's root id), just that one's.
+  graphLevel: "nodes" | "programs";
+  focusedProgram: string | null;
+  // Programs whose final part overlays the viewport, to compare against.
+  pinnedPrograms: string[];
+  setGraphLevel: (v: "nodes" | "programs") => void;
+  focusProgram: (root: string | null) => void;
+  togglePinnedProgram: (root: string) => void;
+  // Cmd/Ctrl+A in the graph: every visible node selected.
+  selectAllNodes: () => void;
+  // The graph's "clean up" layout (utils/graphLayout): new positions by node id.
+  setNodePositions: (positions: Map<string, { x: number; y: number }>) => void;
   // Runs LSQR mesh reconstruction (server-side, against each node's own
   // rest-mesh topology + sampling provenance) for every multi-selected
   // forge_net node, or just selectedNodeId -- same selection-resolution
@@ -358,6 +416,9 @@ interface PipelineStore {
   setDefaultTool: (v: string) => void;
   setForceCorrectClosure: (v: boolean) => void;
   setPhiSymmetry: (v: PhiSymmetry) => void;
+  // A strike node's own symmetry: also the default for the next new nodes,
+  // and its phi snaps to the nearest allowed angle.
+  setNodeSymmetry: (id: string, v: PhiSymmetry) => void;
   fetchTuningProfiles: () => Promise<void>;
   // Reads `rootId`'s (a slab_stock node's) CURRENT material params off its
   // first slab_strike descendant's own copy (via descendantsOf) -- falls
@@ -437,7 +498,9 @@ interface PipelineStore {
 
   // Replaces the whole graph with a root node + linear step chain built
   // from a path JSON (import, or a just-generated path) and cooks it.
-  loadPath: (path: PathJson) => void;
+  // `append`: add the program beside what's in the graph (its own chain)
+  // instead of replacing the graph; the app settings it carries are not applied.
+  loadPath: (path: PathJson, opts?: { append?: boolean }) => void;
   // Walks the current graph as a linear chain (one root with no incoming
   // edges, then each node feeding exactly the next) and emits it as a
   // path JSON. Returns null if the graph branches/merges/is empty --
@@ -481,6 +544,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   cookError: null,
   diagnostics: {},
   viewSequence: false,
+  layoutRequest: 0,
+  graphLevel: "nodes",
+  focusedProgram: null,
+  pinnedPrograms: [],
 
   goalName: null,
   goalVisible: true,
@@ -500,6 +567,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   fieldMax: 1200,
   showTools: true,
   expandHeating: false,
+  pathMetadata: null,
   availableTuningProfiles: [],
   controllerModelKind: null,
   sessionEpoch: 0,
@@ -553,6 +621,21 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   // NodeInspector's phi control reads it live), so there's nothing new to
   // re-cook.
   setPhiSymmetry: (v) => set({ phiSymmetry: v }),
+  setNodeSymmetry: (id, v) => {
+    set((s) => ({
+      phiSymmetry: v,
+      nodes: s.nodes.map((n) => (n.id === id ? { ...n, data: { ...n.data, symmetry: v } } : n)),
+    }));
+    const node = get().nodes.find((n) => n.id === id);
+    const spec = get().nodeKinds.find((k) => k.kind === node?.data.kind)?.params.phi;
+    const step = phiStep(v);
+    if (!node || !spec || step === null) return;
+    const lo = spec.min ?? 0;
+    const hi = spec.max ?? 2 * Math.PI;
+    const phi = Number(node.data.params.phi ?? spec.default);
+    const snapped = Math.min(hi, Math.max(lo, lo + Math.round((phi - lo) / step) * step));
+    if (Math.abs(snapped - phi) > 1e-9) get().updateNodeParam(id, "phi", snapped);
+  },
   setExpandedNodes: (v) => set({ expandedNodes: v }),
 
   fetchTuningProfiles: async () => {
@@ -768,7 +851,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       id,
       type: "pipelineNode",
       position: position ?? { x: 80 + (get().nodes.length % 5) * 220, y: 80 + Math.floor(get().nodes.length / 5) * 160 },
-      data: { kind, params, cooked: false },
+      data: { kind, params, cooked: false, ...(schema?.params.phi ? { symmetry: get().phiSymmetry } : {}) },
     };
     set((s) => ({ nodes: [...s.nodes, node], edges: [...s.edges, ...newEdges], selectedNodeId: id }));
     if (newEdges.length > 0) get().scheduleAutoCook();
@@ -782,6 +865,17 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     }));
     get().scheduleAutoCook();
   },
+
+  setGraphLevel: (v) => set({ graphLevel: v }),
+  focusProgram: (root) => set({ focusedProgram: root, graphLevel: "nodes" }),
+  togglePinnedProgram: (root) => set((s) => ({
+    pinnedPrograms: s.pinnedPrograms.includes(root) ? s.pinnedPrograms.filter((r) => r !== root) : [...s.pinnedPrograms, root],
+  })),
+
+  selectAllNodes: () => set((s) => ({ nodes: s.nodes.map((n) => (n.hidden ? n : { ...n, selected: true })) })),
+
+  setNodePositions: (positions) =>
+    set((s) => ({ nodes: s.nodes.map((n) => (positions.has(n.id) ? { ...n, position: positions.get(n.id)! } : n)) })),
 
   deleteSelectedNodes: () => {
     const { nodes, selectedNodeId } = get();
@@ -977,7 +1071,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     }
     set({
       nodes: [], edges: [], selectedNodeId: null, cookError: null, cooking: false, diagnostics: {},
-      viewSequence: false,
+      viewSequence: false, ...NO_HIERARCHY,
     });
     get().fetchNodeKinds();
   },
@@ -1062,11 +1156,12 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     }
   },
 
-  loadPath: (path) => {
+  loadPath: (path, opts) => {
     if (autoCookTimer) {
       clearTimeout(autoCookTimer);
       autoCookTimer = null;
     }
+    const append = !!opts?.append && get().nodes.length > 0;
     const specs: PathNodeSpec[] = [path.root, ...path.steps];
     const ids = specs.map((s) => nextNodeId(s.kind));
     const { nodeKinds } = get();
@@ -1085,48 +1180,34 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       source: ids[i],
       target: id,
     }));
-    set({
-      nodes: newNodes,
-      edges: newEdges,
-      selectedNodeId: ids[0] ?? null,
-      cookError: null,
-      diagnostics: {},
-      viewSequence: false,
-      ...appSettingsUpdate(path.app_settings),
-    });
+    set(append
+      ? {
+          nodes: [...get().nodes.map((n) => (n.selected ? { ...n, selected: false } : n)), ...newNodes],
+          edges: [...get().edges, ...newEdges],
+          selectedNodeId: ids[0] ?? null,
+          cookError: null,
+          viewSequence: false,
+          layoutRequest: get().layoutRequest + 1,
+        }
+      : {
+          nodes: newNodes,
+          edges: newEdges,
+          selectedNodeId: ids[0] ?? null,
+          cookError: null,
+          diagnostics: {},
+          viewSequence: false,
+          pathMetadata: path.metadata ?? null,
+          layoutRequest: get().layoutRequest + 1,
+          ...NO_HIERARCHY,
+          ...appSettingsUpdate(path.app_settings),
+        });
     get().cook();
   },
 
   exportPath: () => {
-    const { nodes, edges, tag } = get();
-    if (nodes.length === 0) return null;
-
-    const incoming = new Map<string, number>();
-    const outgoingTarget = new Map<string, string>();
-    for (const n of nodes) incoming.set(n.id, 0);
-    for (const e of edges) {
-      if (!incoming.has(e.source) || !incoming.has(e.target)) return null;
-      incoming.set(e.target, (incoming.get(e.target) ?? 0) + 1);
-      // A node feeding more than one other node isn't a linear chain.
-      if (outgoingTarget.has(e.source)) return null;
-      outgoingTarget.set(e.source, e.target);
-    }
-
-    const roots = nodes.filter((n) => (incoming.get(n.id) ?? 0) === 0);
-    if (roots.length !== 1) return null;
-    if (nodes.some((n) => (incoming.get(n.id) ?? 0) > 1)) return null;
-
-    const chainIds: string[] = [roots[0].id];
-    const visited = new Set(chainIds);
-    let cur = roots[0].id;
-    while (outgoingTarget.has(cur)) {
-      const next = outgoingTarget.get(cur)!;
-      if (visited.has(next)) return null; // cycle
-      chainIds.push(next);
-      visited.add(next);
-      cur = next;
-    }
-    if (chainIds.length !== nodes.length) return null; // disconnected node(s)
+    const { nodes, edges, tag, pathMetadata } = get();
+    const chainIds = linearChain(nodes, edges);
+    if (!chainIds) return null;
 
     const byId = new Map(nodes.map((n) => [n.id, n]));
     const toSpec = (id: string): PathNodeSpec => {
@@ -1138,7 +1219,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       name: tag,
       root: toSpec(chainIds[0]),
       steps: chainIds.slice(1).map(toSpec),
-      metadata: { source: "databoarder:export", exported_at: new Date().toISOString() },
+      metadata: { ...(pathMetadata ?? {}), source: "databoarder:export", exported_at: new Date().toISOString() },
       app_settings: buildAppSettingsSnapshot(get()),
     };
   },
@@ -1178,6 +1259,8 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       cookError: null,
       diagnostics: {},
       viewSequence: false,
+      layoutRequest: get().layoutRequest + 1,
+      ...NO_HIERARCHY,
       ...appSettingsUpdate(graph.app_settings),
     });
     get().cook();

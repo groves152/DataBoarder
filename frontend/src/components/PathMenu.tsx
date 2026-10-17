@@ -5,6 +5,7 @@ import { TransformDialog } from "./TransformDialog";
 import { PasteJsonDialog } from "./PasteJsonDialog";
 import { RawJsonDialog } from "./RawJsonDialog";
 import { isPathJson, isGraphJson } from "@/utils/pathJson";
+import type { GeneratorSchema } from "@/types/pipeline";
 
 // Own menu structure (separate from GraphPanel's "+ node kind" toolbar):
 // import/export as JSON, and generate a path deterministically from a
@@ -13,11 +14,65 @@ import { isPathJson, isGraphJson } from "@/utils/pathJson";
 // policies live here) and a raw "graph" (arbitrary-topology nodes+edges,
 // the same shape `cook()` already consumes -- whole-graph or
 // multi-selected-subset persistence). Import accepts either shape.
+// Generators grouped by their registered category (uncategorized last), in
+// the order the categories first appear.
+function generatorGroups(schemas: GeneratorSchema[]): [string, GeneratorSchema[]][] {
+  const groups = new Map<string, GeneratorSchema[]>();
+  for (const g of schemas) {
+    const title = g.category ?? "Generate";
+    groups.set(title, [...(groups.get(title) ?? []), g]);
+  }
+  return [...groups.entries()].sort((a, b) => Number(a[0] === "Generate") - Number(b[0] === "Generate"));
+}
+
+// A row that opens a flyout to its right on hover (or click, for touch), like a
+// desktop application's menu bar; the flyout sits flush against the row so
+// the pointer can cross into it.
+function Submenu({ id, label, openId, setOpenId, children }: {
+  id: string; label: string; openId: string | null; setOpenId: (id: string | null) => void; children: React.ReactNode;
+}) {
+  const isOpen = openId === id;
+  return (
+    <div className="relative" onMouseEnter={() => setOpenId(id)}>
+      <button
+        onClick={() => setOpenId(isOpen ? null : id)}
+        className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
+          isOpen ? "bg-surface text-gray-100" : "text-gray-300 hover:bg-surface hover:text-gray-100"
+        }`}
+      >
+        <span className="flex-1 truncate">{label}</span>
+        <span className="text-gray-500">▸</span>
+      </button>
+      {isOpen && (
+        <div className="absolute left-full top-0 -mt-1 w-64 max-h-[70vh] overflow-y-auto rounded-md border border-border bg-panel shadow-xl py-1">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuItem({ onClick, disabled, title, children }: {
+  onClick: () => void; disabled?: boolean; title?: string; children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-gray-300"
+    >
+      {children}
+    </button>
+  );
+}
+
 export function PathMenu() {
   const {
     generatorSchemas, fetchGeneratorSchemas, transformSchemas, fetchTransformSchemas, loadPath, exportPath, importGraph, exportGraph, tag, nodes,
   } = usePipelineStore();
   const [open, setOpen] = useState(false);
+  const [sub, setSub] = useState<string | null>(null); // the open flyout (desktop-menu style)
   const [exportError, setExportError] = useState<string | null>(null);
   const [activeGenerator, setActiveGenerator] = useState<string | null>(null);
   const [activeTransform, setActiveTransform] = useState<string | null>(null);
@@ -34,7 +89,10 @@ export function PathMenu() {
   }, [fetchGeneratorSchemas, fetchTransformSchemas]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setSub(null);
+      return;
+    }
     function onClickOutside(e: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false);
     }
@@ -110,76 +168,39 @@ export function PathMenu() {
       <input ref={fileInputRef} type="file" accept="application/json,.json" className="hidden" onChange={handleFileChange} />
 
       {open && (
-        <div className="absolute z-40 mt-1 w-64 rounded-md border border-border bg-panel shadow-xl py-1 text-xs">
-          <button
-            onClick={handleImportClick}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
-          >
-            Import file (path or graph JSON)…
-          </button>
-          <button
-            onClick={handlePasteClick}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
-          >
-            Paste JSON…
-          </button>
-          <div className="border-t border-border my-1" />
-          <button
-            onClick={handleExportPathClick}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
-            title="Only works if the graph is a single linear chain, no branches"
-          >
-            Export as path (JSON)
-          </button>
-          <button
-            onClick={() => handleExportGraphClick(false)}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
-          >
-            Export whole graph (JSON)
-          </button>
-          <button
-            onClick={() => handleExportGraphClick(true)}
-            disabled={selectedCount === 0}
-            className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-gray-300"
-          >
-            Export selection (JSON){selectedCount > 0 ? ` — ${selectedCount} node${selectedCount === 1 ? "" : "s"}` : ""}
-          </button>
+        <div className="absolute z-40 mt-1 w-48 rounded-md border border-border bg-panel shadow-xl py-1 text-xs">
+          <Submenu id="import" label="Import" openId={sub} setOpenId={setSub}>
+            <MenuItem onClick={handleImportClick}>From file (path or graph JSON)…</MenuItem>
+            <MenuItem onClick={handlePasteClick}>Paste JSON…</MenuItem>
+          </Submenu>
+          <Submenu id="export" label="Export" openId={sub} setOpenId={setSub}>
+            <MenuItem onClick={handleExportPathClick} title="Only works if the graph is a single linear chain, no branches">
+              As path (JSON)
+            </MenuItem>
+            <MenuItem onClick={() => handleExportGraphClick(false)}>Whole graph (JSON)</MenuItem>
+            <MenuItem onClick={() => handleExportGraphClick(true)} disabled={selectedCount === 0}>
+              Selection (JSON){selectedCount > 0 ? ` — ${selectedCount} node${selectedCount === 1 ? "" : "s"}` : ""}
+            </MenuItem>
+          </Submenu>
           {transformSchemas.length > 0 && (
-            <>
-              <div className="border-t border-border my-1" />
-              <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">Transform this path</div>
+            <Submenu id="transform" label="Transform this path" openId={sub} setOpenId={setSub}>
               {transformSchemas.map((t) => (
-                <button
-                  key={t.name}
-                  onClick={() => {
-                    setActiveTransform(t.name);
-                    setOpen(false);
-                  }}
-                  className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
-                >
+                <MenuItem key={t.name} onClick={() => { setActiveTransform(t.name); setOpen(false); }}>
                   {t.name === "fill_heats" ? "🔥 Fill heat actions…" : `${t.name}…`}
-                </button>
+                </MenuItem>
               ))}
-            </>
+            </Submenu>
           )}
-          {generatorSchemas.length > 0 && (
-            <>
-              <div className="border-t border-border my-1" />
-              <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">Generate</div>
-              {generatorSchemas.map((g) => (
-                <button
-                  key={g.name}
-                  onClick={() => {
-                    setActiveGenerator(g.name);
-                    setOpen(false);
-                  }}
-                  className="w-full text-left px-3 py-1.5 text-gray-300 hover:bg-surface hover:text-gray-100"
-                >
-                  {g.name}…
-                </button>
+          {generatorSchemas.length > 0 && <div className="border-t border-border my-1" />}
+          {generatorGroups(generatorSchemas).map(([title, items]) => (
+            <Submenu key={title} id={`generate:${title}`} label={title} openId={sub} setOpenId={setSub}>
+              {items.map((g) => (
+                <MenuItem key={g.name} title={g.name} onClick={() => { setActiveGenerator(g.name); setOpen(false); }}>
+                  {g.label ?? g.name}…
+                </MenuItem>
               ))}
-            </>
-          )}
+            </Submenu>
+          ))}
         </div>
       )}
 

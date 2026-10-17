@@ -8,9 +8,15 @@ import { PressPreview, type ToolDims } from "./PressPreview";
 import { PathMenu } from "./PathMenu";
 import { WorkspaceMenu } from "./WorkspaceMenu";
 import { SequenceViewToggle } from "./SequenceViewToggle";
-import { GoalOverlay } from "./GoalOverlay";
-import { SequenceTrendPanel } from "./SequenceTrendPanel";
+import { GoalOverlay, GOAL_COLOR } from "./GoalOverlay";
+import { SidePanel } from "./SidePanel";
 import { ViewportSidebar } from "./ViewportSidebar";
+import { ViewMenu } from "./ViewMenu";
+import { ShortcutsHelp } from "./ShortcutsHelp";
+import { usePersistentFlag } from "@/hooks/usePersistentFlag";
+import { useCurrentProgram } from "@/hooks/useCurrentProgram";
+import { programLabel, sequenceTag } from "@/utils/programs";
+import { seriesColor, useResolvedTheme } from "@/theme";
 
 // Drag handle between two Panels in a Group -- headless library, no default
 // styling (see react-resizable-panels' own docs: "Use the `data-separator`
@@ -25,10 +31,19 @@ const SEPARATOR_CLASS =
 
 export function PipelineView() {
   const {
-    run, tag, nodes, nodeKinds, setRun, setTag, selectedNodeId, cook, cooking, diagnostics, viewSequence,
-    goalName, goalVisible, goalOpacity, billetOpacity, showPressPreview,
-    meshField, fieldRangeLocked, fieldMin, fieldMax, showTools, setAvailableFields,
+    run, tag, nodes, nodeKinds, selectedNodeId, cook, cooking, diagnostics, viewSequence,
+    goalName, goalVisible, goalOpacity, billetOpacity,
+    meshField, fieldRangeLocked, fieldMin, fieldMax, showTools, setAvailableFields, pinnedPrograms,
   } = usePipelineStore();
+  const theme = useResolvedTheme();
+  // Several programs in the graph: the replay and stats follow the current one,
+  // and pinned ones overlay their final part (in their card's color).
+  const { programs, current } = useCurrentProgram();
+  const currentIndex = current ? programs.indexOf(current) : -1;
+  const currentLabel = current ? programLabel(current, currentIndex, (id) => {
+    const l = nodes.find((n) => n.id === id)?.data.params.label;
+    return typeof l === "string" && l ? l : undefined;
+  }) : undefined;
   const fieldRange = useMemo(
     () => (fieldRangeLocked ? ([fieldMin, fieldMax] as [number, number]) : null),
     [fieldRangeLocked, fieldMin, fieldMax],
@@ -42,12 +57,14 @@ export function PipelineView() {
   useEffect(() => {
     if (!viewSequence) setPlaybackStep(null);
   }, [viewSequence]);
-  // Independent of viewSequence -- the trend panel is useful in BOTH
-  // sequence playback AND single-node editing (it shows the selected
-  // node's own position on the trend even with no playback happening),
-  // so it's its own on/off toggle. Width is now drag-resizable (its own
-  // Panel below) instead of a two-step "normal/expanded" toggle.
-  const [showTrendPanel, setShowTrendPanel] = useState(true);
+  // Which panels are shown (View ▾), remembered in this browser. The side
+  // panel (search / optimize / stats) is useful in both sequence and
+  // single-node view, so it is independent of viewSequence.
+  const [showSidebar, setShowSidebar] = usePersistentFlag("pipeline.view.renderSettings", true);
+  const [showTrendPanel, setShowTrendPanel] = usePersistentFlag("pipeline.view.sidePanel", true);
+  const [showInspector, setShowInspector] = usePersistentFlag("pipeline.view.inspector", true);
+  // "Expand" on the side panel: remember the layout to restore.
+  const [sideExpandedFrom, setSideExpandedFrom] = useState<Record<string, number> | null>(null);
   // Lives here, NOT inside MeshPanel -- MeshPanel itself fully remounts
   // (fresh <Canvas>/camera/controls) every time `meshTag` changes below
   // (switching nodes, or toggling sequence view), but THIS component
@@ -73,7 +90,7 @@ export function PipelineView() {
   // correctly to one with it closed, and vice versa.
   const outerLayout = useDefaultLayout({ id: "pipeline-outer" });
   const meshRowLayout = useDefaultLayout({ id: "pipeline-mesh-row", panelIds: ["pv-sidebar", "pv-mesh", "pv-trend"] });
-  const graphRowLayout = useDefaultLayout({ id: "pipeline-graph-row" });
+  const graphRowLayout = useDefaultLayout({ id: "pipeline-graph-row", panelIds: ["pv-graph", "pv-inspector"] });
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   const selectedSchema = nodeKinds.find((k) => k.kind === selectedNode?.data.kind);
@@ -87,8 +104,10 @@ export function PipelineView() {
     // Tied to the SELECTED node's live slider values, not whichever frame
     // is currently playing -- showing it during sequence playback would be
     // visually misleading (a static press die pinned to one node while the
-    // billet scrubs through many), so it's suppressed there.
-    if (viewSequence || !showPressPreview || !selectedNode || !selectedSchema) return undefined;
+    // billet scrubs through many), so it's suppressed there. Part of "Show
+    // tooling", and only until the node cooks: then the cooked mesh carries
+    // the real tooling.
+    if (viewSequence || !showTools || !selectedNode || selectedNode.data.cooked || !selectedSchema) return undefined;
     const p = selectedSchema.params;
     if (!p.z || !p.phi || !p.rho || !p.tool) return undefined;
     const toolName = String(selectedNode.data.params.tool ?? p.tool.default);
@@ -120,7 +139,7 @@ export function PipelineView() {
         capped={capped}
       />
     );
-  }, [viewSequence, showPressPreview, selectedNode, selectedSchema, selectedDiag]);
+  }, [viewSequence, showTools, selectedNode, selectedSchema, selectedDiag]);
 
   // Kept visible in BOTH sequence-playback and single-node view (unlike
   // previewOverlay, which is selection-specific) -- a goal is a fixed
@@ -131,31 +150,29 @@ export function PipelineView() {
     return <GoalOverlay run={TARGETS_RUN} tag={`${TARGETS_TAG_PREFIX}${goalName}`} opacity={goalOpacity} />;
   }, [goalVisible, goalName, goalOpacity]);
 
+  const pinnedOverlay = useMemo(() => {
+    const shown = programs.map((p, i) => ({ p, i }))
+      .filter(({ p }) => pinnedPrograms.includes(p.root) && p.root !== current?.root);
+    if (shown.length === 0) return undefined;
+    return <>{shown.map(({ p, i }) => (
+      <GoalOverlay key={p.root} run={run} tag={`${tag}/${p.nodeIds[p.nodeIds.length - 1]}`} opacity={0.4}
+                   color={seriesColor(i, theme)} />
+    ))}</>;
+  }, [programs, pinnedPrograms, current, run, tag, theme]);
+
   const combinedOverlay = useMemo(() => {
-    if (!previewOverlay && !goalOverlay) return undefined;
-    return <>{previewOverlay}{goalOverlay}</>;
-  }, [previewOverlay, goalOverlay]);
+    if (!previewOverlay && !goalOverlay && !pinnedOverlay) return undefined;
+    return <>{previewOverlay}{goalOverlay}{pinnedOverlay}</>;
+  }, [previewOverlay, goalOverlay, pinnedOverlay]);
 
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-3 h-10 border-b border-border bg-panel shrink-0 text-xs">
         <span className="font-semibold text-gray-400 uppercase tracking-wide mr-1">Pipeline</span>
-        <span className="text-gray-500">run</span>
-        <input
-          value={run}
-          onChange={(e) => setRun(e.target.value)}
-          className="bg-surface border border-border rounded px-2 py-1 w-32 text-gray-200"
-        />
-        <span className="text-gray-500">tag</span>
-        <input
-          value={tag}
-          onChange={(e) => setTag(e.target.value)}
-          className="bg-surface border border-border rounded px-2 py-1 w-32 text-gray-200"
-        />
         <button
           onClick={() => cook()}
           disabled={cooking}
-          className="ml-2 px-3 py-1 rounded bg-accent text-white text-xs font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+          className="px-3 py-1 rounded bg-accent text-white text-xs font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
         >
           {cooking ? "Cooking…" : "Cook"}
         </button>
@@ -165,20 +182,16 @@ export function PipelineView() {
           meshRowGroupRef={meshRowGroupRef}
           graphRowGroupRef={graphRowGroupRef}
         />
+        <ViewMenu items={[
+          { label: "Render settings", checked: showSidebar, onChange: setShowSidebar },
+          { label: "Side panel", checked: showTrendPanel, onChange: setShowTrendPanel,
+            hint: "Sequence search / optimize / sequence stats" },
+          { label: "Node inspector", checked: showInspector, onChange: setShowInspector },
+        ]} />
         <SequenceViewToggle />
-        <label className="flex items-center gap-1.5 ml-2 cursor-pointer select-none text-gray-400">
-          <input
-            type="checkbox"
-            checked={showTrendPanel}
-            onChange={(e) => setShowTrendPanel(e.target.checked)}
-            className="accent-accent"
-          />
-          <span>Trend panel</span>
-        </label>
-        <span className="text-gray-500 ml-auto">
-          Viewport shows whichever node is selected — click through a chain, or check "Sequence view" to scrub the
-          whole cooked chain. Shift-drag or ctrl/cmd-click nodes to multi-select for export.
-        </span>
+        <div className="ml-auto">
+          <ShortcutsHelp />
+        </div>
       </div>
 
       <div className="flex-1 min-h-0">
@@ -199,17 +212,36 @@ export function PipelineView() {
               defaultLayout={meshRowLayout.defaultLayout}
               onLayoutChanged={meshRowLayout.onLayoutChanged}
             >
-              <Panel id="pv-sidebar" defaultSize={224} minSize={160} maxSize={420} groupResizeBehavior="preserve-pixel-size">
-                <ViewportSidebar />
-              </Panel>
-              <Separator className={SEPARATOR_CLASS} />
+              {showSidebar && (
+                <>
+                  <Panel id="pv-sidebar" defaultSize={224} minSize={160} maxSize={420} groupResizeBehavior="preserve-pixel-size">
+                    <ViewportSidebar />
+                  </Panel>
+                  <Separator className={SEPARATOR_CLASS} />
+                </>
+              )}
               <Panel id="pv-mesh" defaultSize="60" minSize="20">
                 {(() => {
-                  const meshTag = viewSequence ? `${tag}/__sequence__` : selectedNodeId ? `${tag}/${selectedNodeId}` : null;
+                  const meshTag = viewSequence ? sequenceTag(tag, programs, current)
+                    : selectedNodeId ? `${tag}/${selectedNodeId}` : null;
+                  if (!meshTag && goalName && goalVisible) {
+                    // Nothing selected (or an empty graph): show the goal on its own.
+                    return (
+                      <MeshPanel
+                        key={`goal::${goalName}`}
+                        run={TARGETS_RUN}
+                        tag={`${TARGETS_TAG_PREFIX}${goalName}`}
+                        color={GOAL_COLOR}
+                        meshOpacity={Math.max(goalOpacity, 0.6)}
+                        cameraState={cameraStateRef}
+                        transport={false}
+                      />
+                    );
+                  }
                   if (!meshTag) {
                     return (
                       <div className="h-full w-full flex items-center justify-center text-xs text-gray-500">
-                        Select a node to preview its cooked geometry (its own state, including every upstream hit applied so far).
+                        Select a node to preview its cooked geometry (its own state, including every upstream hit applied so far), or pick a goal.
                       </div>
                     );
                   }
@@ -236,6 +268,8 @@ export function PipelineView() {
                       fieldRange={fieldRange}
                       onFieldsSeen={setAvailableFields}
                       showTools={showTools}
+                      transport={viewSequence}
+                      exportName={currentLabel}
                     />
                   );
                 })()}
@@ -247,11 +281,28 @@ export function PipelineView() {
               {showTrendPanel && (
                 <>
                   <Separator className={SEPARATOR_CLASS} />
-                  <Panel id="pv-trend" defaultSize={416} minSize={240} maxSize={800} groupResizeBehavior="preserve-pixel-size">
-                    <SequenceTrendPanel
+                  <Panel id="pv-trend" defaultSize={416} minSize={240} maxSize="80" groupResizeBehavior="preserve-pixel-size">
+                    <SidePanel
                       playbackStep={playbackStep}
                       selectedNodeId={selectedNodeId}
-                      onClose={() => setShowTrendPanel(false)}
+                      expanded={sideExpandedFrom !== null}
+                      onToggleExpand={() => {
+                        const g = meshRowGroupRef.current;
+                        if (!g) return;
+                        if (sideExpandedFrom) {
+                          g.setLayout(sideExpandedFrom);
+                          setSideExpandedFrom(null);
+                        } else {
+                          const now = g.getLayout();
+                          const side = now["pv-sidebar"] ?? 0;
+                          g.setLayout({ ...now, "pv-trend": 60, "pv-mesh": Math.max(100 - side - 60, 10) });
+                          setSideExpandedFrom(now);
+                        }
+                      }}
+                      onClose={() => {
+                        setShowTrendPanel(false);
+                        setSideExpandedFrom(null);
+                      }}
                     />
                   </Panel>
                 </>
@@ -273,10 +324,14 @@ export function PipelineView() {
               <Panel id="pv-graph" defaultSize="75" minSize="30">
                 <GraphPanel />
               </Panel>
-              <Separator className={SEPARATOR_CLASS} />
-              <Panel id="pv-inspector" defaultSize={288} minSize={220} maxSize={480} groupResizeBehavior="preserve-pixel-size">
-                <NodeInspector />
-              </Panel>
+              {showInspector && (
+                <>
+                  <Separator className={SEPARATOR_CLASS} />
+                  <Panel id="pv-inspector" defaultSize={288} minSize={220} maxSize={480} groupResizeBehavior="preserve-pixel-size">
+                    <NodeInspector />
+                  </Panel>
+                </>
+              )}
             </Group>
           </Panel>
         </Group>

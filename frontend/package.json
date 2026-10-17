@@ -14,6 +14,7 @@
     "@react-three/drei": "^9.106.1",
     "@react-three/fiber": "^8.16.8",
     "@xyflow/react": "^12.11.2",
+    "gifenc": "^1.0.3",
     "plotly.js-dist-min": "^2.33.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

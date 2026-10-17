@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Callable
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -48,7 +48,12 @@ def create_app(
     pipeline_registry: PipelineRegistry | None = None,
     generator_registry: GeneratorRegistry | None = None,
     transform_registry: TransformRegistry | None = None,
+    extend: Callable[[FastAPI], None] | None = None,
 ) -> FastAPI:
+    """`extend(app)` adds a domain package's own routes. It runs after the core
+    API and before the built frontend's catch-all route is mounted (Starlette
+    matches routes in registration order, and the catch-all matches any path,
+    so routes added after `create_app` returns would be unreachable by GET)."""
     pipeline_registry = pipeline_registry if pipeline_registry is not None else PipelineRegistry()
     generator_registry = generator_registry if generator_registry is not None else GeneratorRegistry()
     transform_registry = transform_registry if transform_registry is not None else TransformRegistry()
@@ -135,7 +140,8 @@ def create_app(
             buffer.push(run, node_tag, "mesh", payload, replace=True)
 
         # Also push a step-indexed running history of every mesh-producing
-        # node in topological order, under one dedicated tag -- lets a
+        # node in topological order, per program (connected component: one
+        # stock and its steps), under one dedicated tag each -- lets a
         # frontend "play the whole cooked sequence" view scrub/play through
         # ALL the hits with MeshPanel's existing frame mechanism, instead of
         # re-selecting a different node's single-mesh tag every tick (which
@@ -143,17 +149,25 @@ def create_app(
         # direct cause of "flashing back to stock/unrelated hits" during
         # playback). replace=True only on the FIRST push of this cook
         # clears the previous cook's sequence exactly once; the rest append.
-        seq_tag = f"{tag}/__sequence__"
-        mesh_order = [node_id for node_id in result.order if node_id in result.meshes]
-        for i, node_id in enumerate(mesh_order):
-            buffer.push(run, seq_tag, "mesh", {**payloads[node_id], "step": i, "node_id": node_id},
-                        replace=(i == 0))
+        # One program: "{tag}/__sequence__"; several: one tag each, named by
+        # the program's first node ("{tag}/__sequence__/{root}"), so one
+        # program's replay never mixes in another's steps.
+        programs = graph.programs()
+        listed = []
+        for ids in programs:
+            seq_tag = f"{tag}/__sequence__" if len(programs) == 1 else f"{tag}/__sequence__/{ids[0]}"
+            mesh_order = [node_id for node_id in ids if node_id in result.meshes]
+            for i, node_id in enumerate(mesh_order):
+                buffer.push(run, seq_tag, "mesh", {**payloads[node_id], "step": i, "node_id": node_id},
+                            replace=(i == 0))
+            listed.append({"root": ids[0], "node_ids": ids, "sequence_tag": seq_tag})
 
         return JSONResponse({
             "ok": True,
             "node_ids": list(result.values.keys()),
             "mesh_node_ids": list(result.meshes.keys()),
             "diagnostics": result.diagnostics,
+            "programs": listed,
         })
 
     @app.delete("/api/pipeline/{tag}/cache")
@@ -231,6 +245,9 @@ def create_app(
     # ------------------------------------------------------------------
     # Serve built frontend — mount /assets for JS/CSS, catch-all for SPA
     # ------------------------------------------------------------------
+
+    if extend is not None:
+        extend(app)
 
     if STATIC_DIR.exists():
         assets_dir = STATIC_DIR / "assets"

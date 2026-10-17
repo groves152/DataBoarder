@@ -1,15 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ReactFlow, ReactFlowProvider, Background, Controls, Panel, useReactFlow } from "@xyflow/react";
+import { ReactFlow, ReactFlowProvider, Background, Panel, useReactFlow, type NodeChange, type OnNodesChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { usePipelineStore } from "@/stores/pipelineStore";
 import { PipelineGraphNode } from "./PipelineGraphNode";
 import { HeatingEdge, type HeatingEdgeData } from "./HeatingEdge";
 import { RadialMenu } from "./RadialMenu";
-import { CHROME, useResolvedTheme } from "@/theme";
+import { Icon, IconButton } from "./icons";
+import { layoutGraph } from "@/utils/graphLayout";
+import { programLabel, programsOf } from "@/utils/programs";
+import { ProgramCard, type ProgramCardData } from "./ProgramCard";
+import { CHROME, seriesColor, useResolvedTheme } from "@/theme";
 import type { PipelineNodeData } from "@/types/pipeline";
 import type { Edge, Node } from "@xyflow/react";
 
-const nodeTypes = { pipelineNode: PipelineGraphNode };
+const nodeTypes = { pipelineNode: PipelineGraphNode, programCard: ProgramCard };
+// fit the view, but never zoom past 1:1 (two cards would fill the panel)
+const FIT = { padding: 0.15, duration: 250, maxZoom: 1 };
+const CARD_W = 270;
+const CARD_H = 150;
 const edgeTypes = { heating: HeatingEdge };
 
 // Folds runs of "thermal" nodes (category from the server: heating, dwell --
@@ -60,7 +68,7 @@ type MenuState = { x: number; y: number; flow: { x: number; y: number } } | null
 
 function GraphCanvas() {
   const theme = useResolvedTheme();
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView, zoomIn, zoomOut } = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const lastPointer = useRef<{ x: number; y: number } | null>(null);
   const [menu, setMenu] = useState<MenuState>(null);
@@ -73,17 +81,55 @@ function GraphCanvas() {
     fetchNodeKinds, addNode, deleteSelectedNodes, selectNode, resetGraph, clearCache,
     onNodesChange, onEdgesChange, onConnect,
     copyNodes, paste, expandedNodes, setExpandedNodes, meshSelectedNodes, expandHeating, setExpandHeating,
+    selectAllNodes, setNodePositions, layoutRequest, graphLevel, setGraphLevel, focusedProgram, focusProgram,
   } = usePipelineStore();
+  const programsLevel = graphLevel === "programs";
+  const programsLevelRef = useRef(programsLevel);
+  programsLevelRef.current = programsLevel;
 
   const thermalKinds = useMemo(
     () => new Set(nodeKinds.filter((k) => k.category === "thermal").map((k) => k.kind)), [nodeKinds]);
   // "heats": thermal kinds that add heat (named so), vs. plain time in air
   const heatingKinds = useMemo(
     () => new Set([...thermalKinds].filter((k) => k.includes("heat"))), [thermalKinds]);
-  const view = useMemo(
-    () => (expandHeating ? { nodes, edges } : foldThermal(nodes, edges, thermalKinds, heatingKinds)),
-    [expandHeating, nodes, edges, thermalKinds, heatingKinds],
-  );
+  // The hierarchy (utils/programs): one card per program, or the steps --
+  // every program's, or only the one dived into (plus any loose nodes).
+  const programs = useMemo(() => programsOf(nodes, edges), [nodes, edges]);
+  const focused = programs.find((p) => p.root === focusedProgram);
+  // Cards' dragged positions and measured sizes, by program root (React Flow
+  // hides a node it gets without its `measured` size until it re-measures).
+  const [cardPos, setCardPos] = useState<Record<string, { x: number; y: number }>>({});
+  const [cardSize, setCardSize] = useState<Record<string, { width: number; height: number }>>({});
+  const cards = useMemo(() => {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(programs.length * 1.5)));
+    const labelOf = (id: string) => {
+      const l = nodes.find((n) => n.id === id)?.data.params.label;
+      return typeof l === "string" && l ? l : undefined;
+    };
+    return programs.map((p, i): Node<ProgramCardData> => ({
+      id: `program:${p.root}`,
+      type: "programCard",
+      position: cardPos[p.root] ?? { x: (i % cols) * CARD_W, y: Math.floor(i / cols) * CARD_H },
+      data: { root: p.root, label: programLabel(p, i, labelOf), nodeIds: p.nodeIds, color: seriesColor(i, theme) },
+      selected: !!selectedNodeId && p.nodeIds.includes(selectedNodeId),
+      measured: cardSize[p.root],
+    }));
+  }, [programs, nodes, cardPos, cardSize, selectedNodeId, theme]);
+  const view = useMemo((): { nodes: Node[]; edges: Edge[] } => {
+    if (programsLevel) return { nodes: cards, edges: [] };
+    const all = expandHeating ? { nodes, edges } : foldThermal(nodes, edges, thermalKinds, heatingKinds);
+    if (!focused) return all;
+    const shown = new Set([...focused.nodeIds, ...programs.filter((p) => p.nodeIds.length === 1).map((p) => p.root)]);
+    return {
+      nodes: all.nodes.map((n) => (shown.has(n.id) ? n : { ...n, hidden: true })),
+      edges: all.edges.filter((e) => shown.has(e.source) && shown.has(e.target)),
+    };
+  }, [programsLevel, cards, expandHeating, nodes, edges, thermalKinds, heatingKinds, focused, programs]);
+  // Changing level / diving in: fit what's now shown.
+  useEffect(() => {
+    const t = setTimeout(() => fitView(FIT), 60);
+    return () => clearTimeout(t);
+  }, [graphLevel, focusedProgram, fitView]);
 
   useEffect(() => {
     fetchNodeKinds();
@@ -99,6 +145,8 @@ function GraphCanvas() {
       const target = e.target as HTMLElement | null;
       const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA");
       if (typing) return;
+      // the programs level has no steps to delete / select / copy here
+      if (programsLevelRef.current && e.key !== "Tab") return;
       if (e.key === "Tab" && lastPointer.current) {
         // Tab with the pointer over the canvas: the node menu at the pointer
         e.preventDefault();
@@ -109,6 +157,11 @@ function GraphCanvas() {
         deleteSelectedNodes();
       }
       const cmdOrCtrl = e.metaKey || e.ctrlKey;
+      if (cmdOrCtrl && e.key.toLowerCase() === "a" && lastPointer.current) {
+        // Cmd/Ctrl+A with the pointer over the graph: select every node (elsewhere: the browser's own)
+        e.preventDefault();
+        selectAllNodes();
+      }
       if (cmdOrCtrl && e.key.toLowerCase() === "c") {
         e.preventDefault();
         copyNodes();
@@ -120,7 +173,31 @@ function GraphCanvas() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleteSelectedNodes, copyNodes, paste, openMenuAt]);
+  }, [deleteSelectedNodes, copyNodes, paste, openMenuAt, selectAllNodes]);
+
+  // "Clean up": positions that fit the panel (utils/graphLayout), then fit the view.
+  const cleanUp = useCallback(() => {
+    if (programsLevel) { // cards back on their grid
+      setCardPos({});
+      requestAnimationFrame(() => fitView(FIT));
+      return;
+    }
+    const el = wrapperRef.current;
+    const visible = view.nodes.filter((n) => !n.hidden);
+    if (!el || visible.length === 0) return;
+    setNodePositions(layoutGraph(visible, view.edges, el.clientWidth, el.clientHeight));
+    requestAnimationFrame(() => fitView(FIT));
+  }, [programsLevel, view, setNodePositions, fitView]);
+  // A freshly loaded program is laid out once its nodes have been measured.
+  const cleanUpRef = useRef(cleanUp);
+  cleanUpRef.current = cleanUp;
+  useEffect(() => {
+    if (layoutRequest === 0) return;
+    const t = setTimeout(() => cleanUpRef.current(), 120);
+    return () => clearTimeout(t);
+  }, [layoutRequest]);
+
+  const anySelected = !!selectedNodeId || nodes.some((n) => n.selected);
 
   return (
     <div
@@ -137,6 +214,7 @@ function GraphCanvas() {
           onClose={() => setMenu(null)}
           onPick={(kind) => {
             addNode(kind, menu.flow);
+            if (programsLevel) setGraphLevel("nodes"); // show the new step
             setMenu(null);
           }}
         />
@@ -145,106 +223,110 @@ function GraphCanvas() {
         nodes={view.nodes}
         edges={view.edges}
         edgeTypes={edgeTypes}
-        onNodesChange={onNodesChange}
+        onNodesChange={programsLevel ? (changes: NodeChange[]) => {
+          // cards: their dragged positions and measured sizes are kept (locally)
+          const root = (id: string) => id.slice("program:".length);
+          const moved = changes.flatMap((c) => (c.type === "position" && c.position ? [[root(c.id), c.position] as const] : []));
+          const sized = changes.flatMap((c) => (c.type === "dimensions" && c.dimensions ? [[root(c.id), c.dimensions] as const] : []));
+          if (moved.length) setCardPos((p) => ({ ...p, ...Object.fromEntries(moved) }));
+          if (sized.length) setCardSize((p) => ({ ...p, ...Object.fromEntries(sized) }));
+        } : (onNodesChange as OnNodesChange)}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         nodeTypes={nodeTypes}
         deleteKeyCode={null}
-        onNodeClick={(_, node: Node<PipelineNodeData>) => selectNode(node.id)}
+        onNodeClick={(_, node: Node) => {
+          // a card shows its program's final part
+          if (node.type === "programCard") selectNode((node.data as ProgramCardData).nodeIds.at(-1) ?? null);
+          else selectNode(node.id);
+        }}
+        onNodeDoubleClick={(_, node: Node) => {
+          if (node.type === "programCard") focusProgram((node.data as ProgramCardData).root);
+        }}
         onPaneClick={() => selectNode(null)}
         onPaneContextMenu={(e) => {
           e.preventDefault();
           openMenuAt(e.clientX, e.clientY);
         }}
+        // trackpad: two-finger scroll pans, pinch zooms (a mouse wheel pans too; ctrl+wheel zooms)
+        panOnScroll
+        zoomOnScroll={false}
+        zoomOnPinch
+        proOptions={{ hideAttribution: true }}
         fitView
         colorMode={theme}
       >
         <Background color={CHROME[theme].grid} gap={18} />
-        <Controls showInteractive={false} />
-        <Panel position="top-left">
-          <div className="flex items-center gap-1.5">
-            <button
-              title="Add a node (or right-click / Tab on the canvas)"
-              onClick={(e) => {
-                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                // open beside the button, far enough in that both rings fit on the canvas
-                openMenuAt(r.left + r.width / 2 + 190, r.top + r.height / 2 + 190);
-              }}
-              className="w-10 h-10 rounded-full bg-accent text-white text-2xl leading-none shadow-lg hover:brightness-110 transition flex items-center justify-center"
-            >
-              +
-            </button>
-            <div className="flex gap-1.5 bg-panel border border-border rounded-md p-1">
-            {selectedNodeId && (
-              <button
-                onClick={() => deleteSelectedNodes()}
-                title="Deletes every multi-selected node if any, else just this one"
-                className="text-xs px-2 py-1 rounded bg-surface border border-border text-red-400 hover:border-red-400 transition-colors"
-              >
-                Delete node
-              </button>
-            )}
-            {selectedNodeId && (
-              <button
-                onClick={() => meshSelectedNodes()}
-                title="Runs LSQR mesh reconstruction for every multi-selected forge_net node (or just this one) -- forge_net's own live autocook only ever shows the raw point cloud; this turns it into a real triangulated surface on demand"
-                className="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:border-accent hover:text-gray-100 transition-colors"
-              >
-                🔗 Mesh selected
-              </button>
-            )}
-            <button
-              onClick={resetGraph}
-              title="Clear the graph and re-fetch node kinds from the server"
-              className="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-400 hover:border-accent hover:text-gray-100 transition-colors"
-            >
-              ↺ Reset
-            </button>
-            <button
-              onClick={() => {
-                if (window.confirm(
-                  "Delete all nodes AND permanently release their cooked mesh data on the server " +
-                  "(including SQLite history, if logging is enabled)? This can't be undone.",
-                )) clearCache();
-              }}
-              title="Delete all nodes and purge their cooked meshes from the server buffer"
-              className="text-xs px-2 py-1 rounded bg-surface border border-border text-red-400 hover:border-red-400 transition-colors"
-            >
-              🗑 Clear cache
-            </button>
+        {(programsLevel || focused) && (
+          <Panel position="top-left">
+            <div className="text-[11px] text-gray-400 flex items-center gap-1">
+              {programsLevel ? <span>{programs.length} program{programs.length === 1 ? "" : "s"}: double-click one to open its steps</span> : (
+                <>
+                  <button onClick={() => setGraphLevel("programs")} className="hover:text-gray-100 underline decoration-dotted">
+                    Programs
+                  </button>
+                  <span>›</span>
+                  <span className="text-gray-200">{cards.find((c) => c.data.root === focused?.root)?.data.label}</span>
+                </>
+              )}
             </div>
+          </Panel>
+        )}
+        <Panel position="center-left">
+          <div className="flex flex-col gap-1">
+            {focused && !programsLevel && (
+              <IconButton icon="up" label="Up: every program as one card" onClick={() => setGraphLevel("programs")} />
+            )}
+            <IconButton icon="selectAll" label="Select all (Cmd/Ctrl+A)" onClick={selectAllNodes}
+                        disabled={nodes.length === 0 || programsLevel} />
+            <IconButton icon="trash" label="Delete selected nodes (Delete)" onClick={deleteSelectedNodes} danger
+                        disabled={!anySelected || programsLevel} />
+            <IconButton icon="mesh" label="Mesh selected forge_net nodes (LSQR surface reconstruction)"
+                        onClick={meshSelectedNodes} disabled={!anySelected || programsLevel} />
+            <div className="h-px bg-border my-0.5" />
+            <IconButton icon="layout" label="Clean up: arrange the nodes to fit this panel" onClick={cleanUp}
+                        disabled={nodes.length === 0} />
+            <IconButton icon="fit" label="Fit the view" onClick={() => fitView(FIT)} />
+            <IconButton icon="zoomIn" label="Zoom in (or pinch)" onClick={() => zoomIn({ duration: 150 })} />
+            <IconButton icon="zoomOut" label="Zoom out (or pinch)" onClick={() => zoomOut({ duration: 150 })} />
+            <div className="h-px bg-border my-0.5" />
+            <IconButton icon="reset" label="Reset: clear the graph and re-fetch node kinds" onClick={resetGraph} />
+            <IconButton icon="purge" label="Clear cache: delete all nodes and purge their cooked meshes" danger
+                        onClick={() => {
+                          if (window.confirm(
+                            "Delete all nodes AND permanently release their cooked mesh data on the server " +
+                            "(including SQLite history, if logging is enabled)? This can't be undone.",
+                          )) clearCache();
+                        }} />
           </div>
         </Panel>
-        <Panel position="top-right">
-          <div className="flex items-center gap-2">
-            <label
-              className="flex items-center gap-1.5 cursor-pointer select-none text-[11px] px-2 py-1 rounded bg-panel border border-border text-gray-400"
-              title="Show every node's current param values inline on its card. (Shift-drag to box-select, ctrl/cmd-click to multi-select; Path ▾ exports a selection.)"
-            >
-              <input
-                type="checkbox"
-                checked={expandedNodes}
-                onChange={(e) => setExpandedNodes(e.target.checked)}
-                className="accent-accent"
-              />
-              <span>Expand nodes</span>
-            </label>
+        <Panel position="center-right">
+          <div className="flex flex-col gap-1">
+            <IconButton icon="programs" side="left" active={programsLevel} disabled={nodes.length === 0}
+                        onClick={() => (programsLevel ? focusProgram(null) : setGraphLevel("programs"))}
+                        label={programsLevel ? "Back to the steps (every program)" : "Programs: one card per program, to compare them"} />
+            <IconButton icon="expand" side="left" active={expandedNodes} onClick={() => setExpandedNodes(!expandedNodes)}
+                        label={expandedNodes ? "Collapse node cards" : "Expand nodes: show every param on its card"} />
             {thermalKinds.size > 0 && (
-              <label
-                className="flex items-center gap-1.5 cursor-pointer select-none text-[11px] px-2 py-1 rounded bg-panel border border-border text-gray-400"
-                title="Show heating / dwell steps as their own nodes. Off: they fold into a 🔥 badge on the edge between forging steps (click it to inspect)."
-              >
-                <input
-                  type="checkbox"
-                  checked={expandHeating}
-                  onChange={(e) => setExpandHeating(e.target.checked)}
-                  className="accent-accent"
-                />
-                <span>Expand heating actions</span>
-              </label>
+              <IconButton icon="flame" side="left" active={expandHeating} onClick={() => setExpandHeating(!expandHeating)}
+                          label={expandHeating ? "Fold heating / dwell steps into the edges"
+                                               : "Expand heating actions: show heating / dwell steps as nodes"} />
             )}
-
           </div>
+        </Panel>
+        <Panel position="bottom-right">
+          <button
+            title="Add a node (or right-click / Tab on the canvas)"
+            aria-label="Add a node"
+            onClick={(e) => {
+              const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+              // open up and to the left of the button, far enough in that both rings fit
+              openMenuAt(r.left + r.width / 2 - 190, r.top + r.height / 2 - 190);
+            }}
+            className="w-10 h-10 rounded-full bg-accent text-white shadow-lg hover:brightness-110 transition flex items-center justify-center"
+          >
+            <Icon name="plus" className="w-5 h-5" />
+          </button>
         </Panel>
         {nodes.length > 0 && edges.length === 0 && (
           <Panel position="top-center">

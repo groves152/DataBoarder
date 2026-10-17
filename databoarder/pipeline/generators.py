@@ -32,12 +32,21 @@ class GeneratorSpec:
     name: str
     handler: GeneratorHandler
     params: dict[str, ParamSpec] = field(default_factory=dict)
+    # Optional menu grouping and display name (the frontend groups by category
+    # and shows `label`, falling back to `name`).
+    category: str | None = None
+    label: str | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "name": self.name,
             "params": {name: spec.to_json() for name, spec in self.params.items()},
         }
+        if self.category:
+            out["category"] = self.category
+        if self.label:
+            out["label"] = self.label
+        return out
 
 
 class GeneratorRegistry:
@@ -49,8 +58,11 @@ class GeneratorRegistry:
         name: str,
         handler: GeneratorHandler,
         params: dict[str, ParamSpec] | None = None,
+        category: str | None = None,
+        label: str | None = None,
     ) -> None:
-        self._generators[name] = GeneratorSpec(name=name, handler=handler, params=params or {})
+        self._generators[name] = GeneratorSpec(name=name, handler=handler, params=params or {}, category=category,
+                                               label=label)
 
     def get(self, name: str) -> GeneratorSpec | None:
         return self._generators.get(name)

@@ -18,6 +18,9 @@ export interface ParamSpec {
   // Per-select-option metadata, opaque to the store -- e.g. real press-tool
   // dimensions, used by PressPreview to draw the live strike overlay.
   options_meta?: Record<string, Record<string, number | string>>;
+  // A continuous param a gradient optimizer may tune (the inspector shows an
+  // "optimize" toggle next to it).
+  optimizable?: boolean;
 }
 
 export interface NodeKindSchema {
@@ -34,6 +37,9 @@ export interface PipelineNodeData extends Record<string, unknown> {
   params: Record<string, ParamValue>;
   // Set after a successful cook; cleared (stale) on any param/topology edit.
   cooked: boolean;
+  // A strike's angle symmetry (a PHI_SYMMETRY_PRESETS key): which angles its
+  // phi slider snaps to. UI only, never cooked. Unset: the session default.
+  symmetry?: string;
 }
 
 export interface PipelineEdgeSpec {
@@ -101,6 +107,8 @@ export interface PathJson {
 export interface GeneratorSchema {
   name: string;
   params: Record<string, ParamSpec>;
+  category?: string; // menu group
+  label?: string; // display name (falls back to name)
 }
 
 export interface GenerateResponse {

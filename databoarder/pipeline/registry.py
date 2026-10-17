@@ -52,6 +52,9 @@ class ParamSpec:
     # dimensions) can attach display hints to select options without this
     # module knowing what any of the keys mean.
     options_meta: dict[str, dict[str, Any]] | None = None
+    # A continuous param a gradient optimizer may tune (the frontend shows an
+    # "optimize" toggle next to it). Purely a hint; DataBoarder runs nothing.
+    optimizable: bool = False
 
     def to_json(self) -> dict[str, Any]:
         d: dict[str, Any] = {"type": self.type, "default": self.default}
@@ -69,6 +72,8 @@ class ParamSpec:
             d["description"] = self.description
         if self.options_meta is not None:
             d["options_meta"] = self.options_meta
+        if self.optimizable:
+            d["optimizable"] = True
         return d
 
 

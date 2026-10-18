@@ -1,4 +1,6 @@
-import { usePipelineStore } from "@/stores/pipelineStore";
+import { type GridPlane, usePipelineStore } from "@/stores/pipelineStore";
+
+const GRID_CELLS: [number, string][] = [[0.1, "0.1 mm"], [1, "1 mm"], [5, "5 mm"], [10, "10 mm"], [25.4, "1 in"]];
 import { StartGoalPicker } from "./StartGoalPicker";
 
 // Render/press-config panel, left of the mesh viewport -- collapse/resize
@@ -20,7 +22,7 @@ export function ViewportSidebar() {
     forceCorrectClosure, setForceCorrectClosure,
     meshField, setMeshField, availableFields,
     fieldRangeLocked, setFieldRangeLocked, fieldMin, fieldMax, setFieldRange,
-    showTools, setShowTools,
+    showTools, setShowTools, viewGrid, setViewGrid,
   } = usePipelineStore();
 
   // Whichever registered node kind's schema has a "tool" param first --
@@ -90,6 +92,26 @@ export function ViewportSidebar() {
             />
             <span>Show tooling</span>
           </label>
+          <div className="flex items-center gap-1.5">
+            <label className="flex items-center gap-1.5 cursor-pointer select-none flex-1"
+                   title="A grid in the part's own mm, from its origin (a goal's grip end), under the part">
+              <input type="checkbox" checked={viewGrid.on} onChange={(e) => setViewGrid({ on: e.target.checked })}
+                     className="accent-accent" />
+              <span>Show grid</span>
+            </label>
+            <select value={viewGrid.cell} onChange={(e) => setViewGrid({ cell: Number(e.target.value), on: true })}
+                    aria-label="Grid cell" title="Cell size (a heavier line every 10 cells)"
+                    className="bg-surface border border-border rounded px-1 py-0.5 text-gray-200">
+              {GRID_CELLS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+            </select>
+            <select value={viewGrid.plane} onChange={(e) => setViewGrid({ plane: e.target.value as GridPlane, on: true })}
+                    aria-label="Grid plane" title="The plane the grid lies in (under the part)"
+                    className="bg-surface border border-border rounded px-1 py-0.5 text-gray-200">
+              <option value="xz">x–z</option>
+              <option value="xy">x–y</option>
+              <option value="yz">y–z</option>
+            </select>
+          </div>
         </div>
 
         <label className="flex flex-col gap-1 border-t border-border pt-3">

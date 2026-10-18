@@ -10,16 +10,16 @@ import { toast } from "@/stores/toastStore";
 // can also be made here: an uploaded mesh file, or the selected cooked part
 // (the end of one leg, to aim the next at) -- forge-genie's goals.py.
 
-type GoalForm = { kind: "upload"; file: File; name: string; units: string; flip: boolean }
+type GoalForm = { kind: "upload"; file: File; name: string; units: string }
   | { kind: "node"; node: string; name: string };
-const UNITS: Record<string, number> = { mm: 1, inch: 25.4, m: 1000 };
+const UNITS: [string, string][] = [["mm", "mm"], ["cm", "cm"], ["m", "m"], ["inch", "inches"]];
 const safeName = (s: string) => s.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^[^A-Za-z0-9]+/, "").slice(0, 64) || "goal";
 const smallBtn = "px-1.5 py-0.5 rounded border border-border text-[11px] text-gray-300 hover:border-accent hover:text-gray-100 transition-colors disabled:opacity-40";
 export function StartGoalPicker() {
   const {
     nodes, nodeKinds, selectedNodeId, selectNode, addNode, run, tag,
     availableGoals, fetchAvailableGoals, goalName, setGoalName, goalVisible, setGoalVisible, goalOpacity,
-    setGoalOpacity,
+    setGoalOpacity, setGoalEditing,
   } = usePipelineStore();
 
   const [userGoals, setUserGoals] = useState<Set<string>>(new Set());
@@ -41,7 +41,9 @@ export function StartGoalPicker() {
     if (!form) return;
     const res = form.kind === "upload"
       ? await fetch(`/api/forge/goals/${encodeURIComponent(form.name)}?` + new URLSearchParams({
-          filename: form.file.name, scale: String(UNITS[form.units]), flip: String(form.flip) }), { method: "PUT", body: form.file })
+          filename: form.file.name,
+          // as the file has it, the grip (low-x) end at the origin: the editor (opened next) does the rest
+          transform: JSON.stringify({ units: form.units, place: "grip_origin" }) }), { method: "PUT", body: form.file })
       : await fetch("/api/forge/goals/from_node", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: form.name, node: form.node, run, tag }) });
     const data = await res.json().catch(() => ({}));
@@ -55,9 +57,11 @@ export function StartGoalPicker() {
       ? Math.PI * stock.radius ** 2 * stock.length : null;
     toast({ text: `Goal "${data.name}": ${Math.round(data.volume_mm3).toLocaleString()} mm³, ${data.length_mm.toFixed(1)} mm long` +
                   (stockVol ? ` (${(data.volume_mm3 / stockVol).toFixed(2)}× the stock's volume)` : ""), tone: "success" });
+    const uploaded = form.kind === "upload";
     setForm(null);
     await refreshGoals();
     setGoalName(data.name);
+    if (uploaded) setGoalEditing(data.name); // check its size and orientation
   };
   const removeGoal = async () => {
     if (!goalName || !window.confirm(`Delete your goal "${goalName}"?`)) return;
@@ -101,7 +105,7 @@ export function StartGoalPicker() {
           <option key={name} value={name}>{name}</option>
         ))}
       </select>
-      <div className="flex gap-1">
+      <div className="flex flex-wrap gap-1">
         <button className={smallBtn} onClick={() => fileRef.current?.click()} title="A mesh file (STL, OBJ, PLY...) as a new goal">
           Upload…
         </button>
@@ -111,6 +115,10 @@ export function StartGoalPicker() {
                   `${typeof selected.data.params.label === "string" && selected.data.params.label ? selected.data.params.label : selected.id}_goal`) })}>
           From part
         </button>
+        <button className={smallBtn} disabled={!goalName} onClick={() => goalName && setGoalEditing(goalName)}
+                title="Scale, turn and place the goal mesh (a library goal is saved as a copy of yours)">
+          Edit…
+        </button>
         <button className={smallBtn} disabled={!goalName || !userGoals.has(goalName)} onClick={() => void removeGoal()}
                 title="Delete this goal (only goals made here)">
           Delete
@@ -119,7 +127,7 @@ export function StartGoalPicker() {
                onChange={(e) => {
                  const file = e.target.files?.[0];
                  e.target.value = "";
-                 if (file) setForm({ kind: "upload", file, name: safeName(file.name), units: "mm", flip: false });
+                 if (file) setForm({ kind: "upload", file, name: safeName(file.name), units: "mm" });
                }} />
       </div>
       {form && (
@@ -130,16 +138,13 @@ export function StartGoalPicker() {
           <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} aria-label="Goal name"
                  className="bg-panel border border-border rounded px-1.5 py-0.5 text-gray-200" />
           {form.kind === "upload" && (
-            <div className="flex items-center gap-2">
+            <label className="flex items-center gap-2" title="What one unit in the file is (most CAD exports: mm). Size, orientation and placement can be set next.">
+              <span>file units</span>
               <select value={form.units} onChange={(e) => setForm({ ...form, units: e.target.value })} aria-label="Units"
                       className="bg-panel border border-border rounded px-1 py-0.5 text-gray-200">
-                {Object.keys(UNITS).map((u) => <option key={u} value={u}>{u}</option>)}
+                {UNITS.map(([u, label]) => <option key={u} value={u}>{label}</option>)}
               </select>
-              <label className="flex items-center gap-1 cursor-pointer select-none" title="The mesh is laid along x from the grip end; this swaps which end that is">
-                <input type="checkbox" className="accent-accent" checked={form.flip} onChange={(e) => setForm({ ...form, flip: e.target.checked })} />
-                flip ends
-              </label>
-            </div>
+            </label>
           )}
           <div className="flex gap-1">
             <button className={smallBtn} onClick={() => void submit()}>Make goal</button>

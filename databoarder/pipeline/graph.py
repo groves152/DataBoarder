@@ -42,9 +42,10 @@ class Graph:
             ],
         }
 
-    def topological_order(self) -> list[str]:
+    def topological_order(self, extra: "list[tuple[str, str]] | tuple" = ()) -> list[str]:
         """Kahn's algorithm. Raises ValueError on a cycle or an edge
-        referencing an unknown node id."""
+        referencing an unknown node id. `extra`: more (before, after) pairs
+        to respect -- e.g. a node and the nodes its params refer to."""
         node_ids = [n.id for n in self.nodes]
         known = set(node_ids)
         incoming: dict[str, int] = {nid: 0 for nid in node_ids}
@@ -56,6 +57,10 @@ class Graph:
                 )
             adjacency[e.source].append(e.target)
             incoming[e.target] += 1
+        for before, after in extra:
+            if before in known and after in known:
+                adjacency[before].append(after)
+                incoming[after] += 1
 
         ready = [nid for nid in node_ids if incoming[nid] == 0]
         order: list[str] = []

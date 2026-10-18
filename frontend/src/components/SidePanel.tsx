@@ -5,14 +5,15 @@ import { SearchPanel } from "./SearchPanel";
 import { LibraryPanel } from "./LibraryPanel";
 import { ComparePanel } from "./ComparePanel";
 import { ProfilePanel } from "./ProfilePanel";
+import { PlanPanel } from "./PlanPanel";
 
-// The pipeline view's right-hand panel: program search (MAP-Elites over hit
-// sequences), the gradient optimizer, per-step statistics of the current
+// The pipeline view's right-hand panel: the goal planned as operations (Plan),
+// program search (MAP-Elites over hit sequences), the gradient optimizer, per-step statistics of the current
 // sequence, the part's profile against the goal, programs compared side by
 // side, and the library of saved graphs. "Expand" widens the panel over the viewport (the caller owns the
 // layout), e.g. to watch a search's archive fill up.
 
-type Tab = "search" | "optimize" | "stats" | "profile" | "compare" | "library";
+type Tab = "plan" | "search" | "optimize" | "stats" | "profile" | "compare" | "library";
 
 interface Props {
   playbackStep: number | null;
@@ -33,6 +34,7 @@ export function SidePanel({ playbackStep, selectedNodeId, expanded, onToggleExpa
     <div className="h-full flex flex-col bg-panel">
       <div className="flex items-center gap-1 px-1.5 border-b border-border shrink-0">
         <div className="flex items-center gap-0.5 flex-1 min-w-0 overflow-x-auto">
+        <button className={tabClass("plan")} onClick={() => setTab("plan")}>Plan</button>
         <button className={tabClass("search")} onClick={() => setTab("search")}>Search</button>
         <button className={tabClass("optimize")} onClick={() => setTab("optimize")}>Optimize</button>
         <button className={tabClass("stats")} onClick={() => setTab("stats")}>Stats</button>
@@ -58,6 +60,7 @@ export function SidePanel({ playbackStep, selectedNodeId, expanded, onToggleExpa
         </div>
       </div>
       <div className="flex-1 min-h-0">
+        {tab === "plan" && <PlanPanel />}
         {tab === "search" && <SearchPanel />}
         {tab === "optimize" && <OptimizePanel />}
         {tab === "stats" && <SequenceTrendPanel playbackStep={playbackStep} selectedNodeId={selectedNodeId} />}

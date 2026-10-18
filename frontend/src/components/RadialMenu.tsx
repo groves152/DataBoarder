@@ -6,9 +6,9 @@ import type { NodeKindSchema } from "@/types/pipeline";
 // (a single-kind category adds that kind directly). Opened from the graph's
 // floating "+" button or by right-click / Tab on the canvas.
 
-const CATEGORY_ORDER = ["stock", "press", "bend", "cut", "handling", "thermal", "slab (legacy)", "forge-net", "other"];
+const CATEGORY_ORDER = ["stock", "goal", "control", "press", "bend", "cut", "handling", "thermal", "slab (legacy)", "forge-net", "other"];
 const CATEGORY_ICON: Record<string, string> = {
-  stock: "▮", press: "⬍", bend: "↪", cut: "✂", handling: "⇄", thermal: "🔥", "slab (legacy)": "▤",
+  stock: "▮", goal: "◉", control: "⟳", press: "⬍", bend: "↪", cut: "✂", handling: "⇄", thermal: "🔥", "slab (legacy)": "▤",
   "forge-net": "◎", other: "•",
 };
 

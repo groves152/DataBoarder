@@ -13,7 +13,7 @@ import { ScalarPanel } from "./ScalarPanel";
 // program's result. Results open as paths, reheats filled in, ready to polish
 // in the Optimize tab.
 
-function Section({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
+export function Section({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
   return (
     <div className="border-b border-border px-3 py-2">
       <div className="flex items-center mb-1.5">
@@ -25,11 +25,11 @@ function Section({ title, children, right }: { title: string; children: React.Re
   );
 }
 
-const field = "bg-surface border border-border rounded px-1 py-0.5 text-gray-200 tabular-nums disabled:opacity-40";
-const smallBtn =
+export const field = "bg-surface border border-border rounded px-1 py-0.5 text-gray-200 tabular-nums disabled:opacity-40";
+export const smallBtn =
   "text-[10px] px-1.5 py-0.5 rounded border border-border text-gray-300 hover:border-accent hover:text-gray-100 transition-colors disabled:opacity-40";
 
-function FieldInput({ f, value, disabled, onChange }: {
+export function FieldInput({ f, value, disabled, onChange }: {
   f: FieldSpec; value: SettingValue; disabled: boolean; onChange: (v: SettingValue) => void;
 }) {
   if (f.kind === "bool") {

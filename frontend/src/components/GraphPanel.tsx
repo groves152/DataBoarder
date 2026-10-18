@@ -116,16 +116,34 @@ function GraphCanvas() {
       measured: cardSize[p.root],
     }));
   }, [programs, nodes, cardPos, cardSize, selectedNodeId, theme]);
+  // A node param that refers to another node ("node_ref": e.g. a controller's
+  // subgoal) shows as a dashed link from that node -- display only: it isn't
+  // an edge of the graph, and can't be selected or deleted.
+  const refEdges = useMemo((): Edge[] => {
+    const ids = new Set(nodes.map((n) => n.id));
+    const out: Edge[] = [];
+    for (const n of nodes) {
+      const params = nodeKinds.find((k) => k.kind === n.data.kind)?.params ?? {};
+      for (const [name, spec] of Object.entries(params)) {
+        const ref = n.data.params[name];
+        if (spec.type !== "node_ref" || typeof ref !== "string" || !ids.has(ref)) continue;
+        out.push({ id: `ref:${ref}->${n.id}:${name}`, source: ref, target: n.id, selectable: false, deletable: false,
+                   focusable: false, style: { stroke: "#fbbf24", strokeDasharray: "5 4", opacity: 0.8 } });
+      }
+    }
+    return out;
+  }, [nodes, nodeKinds]);
   const view = useMemo((): { nodes: Node[]; edges: Edge[] } => {
     if (programsLevel) return { nodes: cards, edges: [] };
-    const all = expandHeating ? { nodes, edges } : foldThermal(nodes, edges, thermalKinds, heatingKinds);
+    const folded = expandHeating ? { nodes, edges } : foldThermal(nodes, edges, thermalKinds, heatingKinds);
+    const all = { nodes: folded.nodes, edges: [...folded.edges, ...refEdges] };
     if (!focused) return all;
     const shown = new Set([...focused.nodeIds, ...programs.filter((p) => p.nodeIds.length === 1).map((p) => p.root)]);
     return {
       nodes: all.nodes.map((n) => (shown.has(n.id) ? n : { ...n, hidden: true })),
       edges: all.edges.filter((e) => shown.has(e.source) && shown.has(e.target)),
     };
-  }, [programsLevel, cards, expandHeating, nodes, edges, thermalKinds, heatingKinds, focused, programs]);
+  }, [programsLevel, cards, expandHeating, nodes, edges, thermalKinds, heatingKinds, focused, programs, refEdges]);
   // Changing level / diving in: fit what's now shown.
   useEffect(() => {
     const t = setTimeout(() => fitView(FIT), 60);

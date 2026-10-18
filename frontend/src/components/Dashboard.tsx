@@ -105,6 +105,7 @@ function RunTabs({ onRefresh }: { onRefresh: () => void }) {
 // ── Tag sidebar ───────────────────────────────────────────────────────────────
 function TagSidebar({ run }: { run: string }) {
   const entries   = useDataStore((s) => s.entries[run] ?? {});
+  const types     = useDataStore((s) => s.tagTypes[run]);
   const enabled   = useDataStore((s) => s.enabledTags[run] ?? []);
   const toggleTag = useDataStore((s) => s.toggleTag);
   const panels    = useLayoutStore((s) => s.panels);
@@ -112,7 +113,7 @@ function TagSidebar({ run }: { run: string }) {
   const activeInPanel = new Set(
     panels.flatMap((p) => p.sources.filter((s) => s.run === run).map((s) => s.tag)),
   );
-  const tags = Object.keys(entries);
+  const tags = Array.from(new Set([...Object.keys(types ?? {}), ...Object.keys(entries)]));
 
   return (
     <aside className="w-52 shrink-0 bg-panel border-r border-border flex flex-col overflow-hidden">
@@ -145,6 +146,7 @@ export function Dashboard() {
   const activeRun   = useDataStore((s) => s.activeRun);
   const enabledTags = useDataStore((s) => s.enabledTags[activeRun] ?? []);
   const runEntries  = useDataStore((s) => s.entries[activeRun] ?? {});
+  const runTypes    = useDataStore((s) => s.tagTypes[activeRun]);
   const toggleTag   = useDataStore((s) => s.toggleTag);
   const refreshRun  = useDataStore((s) => s.refreshRun);
   const { panels, addPanel, removeSource, updateGridLayout, merge } = useLayoutStore();
@@ -177,7 +179,7 @@ export function Dashboard() {
     for (const tag of enabledTags) {
       if (!prev.includes(tag)) {
         const id = `${activeRun}::${tag}::${Date.now()}`;
-        const type = inferType(runEntries[tag] ?? []);
+        const type = runTypes?.[tag] ?? inferType(runEntries[tag] ?? []);
         const { w, h } = DEFAULT_SIZE[type] ?? { w: 4, h: 6 };
         const { x, y } = findFreePosition(panels, w, h);
         addPanel({ i: id, x, y, w, h, sources: [{ run: activeRun, tag, type }], mergeMode: "overlay" });

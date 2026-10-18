@@ -5,6 +5,8 @@ import type { MeshData } from "@/types";
 // Distinct from the billet's purple and PressPreview's orange/red, so a
 // goal mesh reads as a third, separate thing at a glance.
 export const GOAL_COLOR = "#4ade80";
+// A plan's subgoal (the shape one leg should make): amber, beside the goal's green.
+export const SUBGOAL_COLOR = "#fbbf24";
 
 interface Props { run: string; tag: string; opacity: number; color?: string }
 

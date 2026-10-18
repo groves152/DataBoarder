@@ -11,6 +11,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from databoarder.converters import jsonable
+
 _WS_CLIENTS: set[Any] = set()
 
 
@@ -60,7 +62,8 @@ class DataBuffer:
     # Public API
     # ------------------------------------------------------------------
 
-    def push(self, run: str, tag: str, dtype: str, payload: dict[str, Any], replace: bool = False) -> None:
+    def push(self, run: str, tag: str, dtype: str, payload: dict[str, Any], replace: bool = False,
+             broadcast: bool = True) -> None:
         """`replace=True` clears any existing entries for this (run, tag)
         first, in memory AND in the SQLite backing store (if any) -- for a
         producer where a tag holds a single CURRENT value (e.g. a pipeline
@@ -81,10 +84,11 @@ class DataBuffer:
             if self._conn is not None:
                 self._conn.execute(
                     "INSERT INTO entries (run, tag, type, step, data) VALUES (?, ?, ?, ?, ?)",
-                    (run, tag, dtype, payload.get("step", 0), json.dumps(payload)),
+                    (run, tag, dtype, payload.get("step", 0), json.dumps(payload, default=jsonable)),
                 )
                 self._conn.commit()
-        self._broadcast(run, tag, dtype, payload)
+        if broadcast:  # (not: a bulk producer that tells its clients when to fetch, e.g. a replay being built)
+            self._broadcast(run, tag, dtype, payload, replace)
 
     def clear(self, run: str, tag_prefix: str | None = None) -> list[str]:
         """Deletes every (run, tag) bucket for `run`, optionally restricted
@@ -121,6 +125,12 @@ class DataBuffer:
     def tags(self, run: str) -> list[str]:
         with self._lock:
             return list(self._store.get(run, {}).keys())
+
+    def tag_types(self, run: str) -> dict[str, str]:
+        """Each tag's data type (its latest entry's): what a client needs to
+        list a tag without fetching its entries (a mesh tag's can be large)."""
+        with self._lock:
+            return {tag: q[-1]["type"] for tag, q in self._store.get(run, {}).items() if q}
 
     def runs(self) -> list[str]:
         with self._lock:
@@ -174,10 +184,13 @@ class DataBuffer:
             except (json.JSONDecodeError, KeyError):
                 pass  # skip corrupt rows
 
-    def _broadcast(self, run: str, tag: str, dtype: str, payload: dict[str, Any]) -> None:
+    def _broadcast(self, run: str, tag: str, dtype: str, payload: dict[str, Any], replace: bool = False) -> None:
         if not _WS_CLIENTS or self._loop is None:
             return
-        msg = json.dumps({"run": run, "tag": tag, "type": dtype, "data": payload})
+        # `replace`: the tag's earlier entries are gone -- a client drops its
+        # copies too (else a re-cooked, shorter sequence keeps the old tail)
+        msg = json.dumps({"run": run, "tag": tag, "type": dtype, "data": payload, **({"replace": True} if replace else {})},
+                         default=jsonable)
         asyncio.run_coroutine_threadsafe(_push_all(msg), self._loop)
 
 

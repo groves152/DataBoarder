@@ -22,7 +22,7 @@ export function ControllerModeView() {
   const {
     run, tag, nodes, nodeKinds, selectedNodeId, diagnostics, viewSequence,
     goalName, goalVisible, goalOpacity, billetOpacity, showPressPreview, controllerModelKind, startControllerSession,
-    fetchAvailableGoals, fetchNodeKinds, sessionEpoch,
+    fetchAvailableGoals, fetchNodeKinds, sessionEpoch, edges, cookEpoch, ensureMeshes, ensureReplay,
   } = usePipelineStore();
   const cameraStateRef = useRef<CameraState | null>(null);
   const gamepad = useGamepadConnection();
@@ -45,6 +45,15 @@ export function ControllerModeView() {
   // (which also makes cycling BACK to an already-committed node switch
   // immediately, since its cooked flag is already true).
   const [displayedNodeId, setDisplayedNodeId] = useState<string | null>(null);
+  // Meshes are made as they're shown (a lazy cook meshes only the chain's end
+  // and the selected node): the node displayed, the replay opened.
+  useEffect(() => {
+    if (displayedNodeId && cookEpoch > 0) void ensureMeshes([displayedNodeId]);
+  }, [displayedNodeId, cookEpoch, ensureMeshes]);
+  const chainRoot = nodes.find((n) => !edges.some((e) => e.target === n.id))?.id;
+  useEffect(() => {
+    if (viewSequence && chainRoot && cookEpoch > 0) void ensureReplay(chainRoot);
+  }, [viewSequence, chainRoot, cookEpoch, ensureReplay]);
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
   useEffect(() => {
     if (selectedNode?.data.cooked) setDisplayedNodeId(selectedNodeId);

@@ -9,7 +9,8 @@ import {
   applyEdgeChanges,
   addEdge,
 } from "@xyflow/react";
-import { programsOf } from "@/utils/programs";
+import { programsOf, sequenceTag } from "@/utils/programs";
+import { useDataStore } from "@/stores/dataStore";
 import type {
   NodeKindSchema, PipelineNodeData, CookResponse, NodeDiagnostics, ParamValue,
   PathJson, PathNodeSpec, GeneratorSchema, GraphJson, AppSettingsSnapshot, TuningProfile,
@@ -23,6 +24,32 @@ const MATERIAL_PARAM_KEYS = [
 type MaterialParamKey = (typeof MATERIAL_PARAM_KEYS)[number];
 
 const AUTO_COOK_DEBOUNCE_MS = 500;
+
+export type GridPlane = "xz" | "xy" | "yz";
+export interface ViewGrid { on: boolean; cell: number; plane: GridPlane }
+const VIEW_GRID_KEY = "databoarder.viewGrid";
+const SUBFRAMES_KEY = "databoarder.subframes";
+function loadSubframes(): number {
+  try {
+    return Math.max(0, Number(localStorage.getItem(SUBFRAMES_KEY) ?? 0) || 0);
+  } catch {
+    return 0;
+  }
+}
+function loadViewGrid(): ViewGrid {
+  const fallback: ViewGrid = { on: false, cell: 1, plane: "xz" };
+  try {
+    const saved = JSON.parse(localStorage.getItem(VIEW_GRID_KEY) ?? "null");
+    return saved ? { ...fallback, ...saved } : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+// What a cook passes its nodes' diagnostics (the goal), if anything.
+function cookContext(goal: string | null): Record<string, unknown> | undefined {
+  return goal ? { goal } : undefined;
+}
 
 // Must match forge_search.ui_nodes.targets.TARGETS_RUN/TARGETS_TAG_PREFIX.
 // Exported so components building a goal mesh's (run, tag) pair (e.g.
@@ -267,6 +294,16 @@ interface PipelineStore {
   tag: string;
   cooking: boolean;
   cookError: string | null;
+  // Lazy meshing: a cook computes every node but meshes only each program's
+  // end and the viewed node; the rest are meshed as they're shown
+  // (`ensureMeshes`), a replay when it's opened (`ensureReplay`). Counted
+  // per cook, so a mesh or replay is asked for once.
+  cookEpoch: number;
+  meshedNodes: string[];
+  replay: { root: string; epoch: number; subframes: number } | null;
+  replayBuilding: boolean;
+  ensureMeshes: (nodes: string[]) => Promise<void>;
+  ensureReplay: (root: string) => Promise<void>;
   // node id -> extra info from its last cook (e.g. "was a param capped").
   diagnostics: Record<string, NodeDiagnostics>;
   // Whether the viewport shows the whole cooked chain's step-indexed
@@ -349,6 +386,16 @@ interface PipelineStore {
   fieldMax: number;
   // Draw the tooling meshes a node carries (dies, punch, induction coil...).
   showTools: boolean;
+  // A grid in the viewport, in the part's own mm (a viewer preference, kept
+  // in this browser): its cell size and which plane it lies in.
+  viewGrid: ViewGrid;
+  // The goal mesh being edited (GoalEditor), and its preview's tag (under
+  // TARGETS_RUN) the viewport shows in the goal's place meanwhile.
+  goalEditing: string | null;
+  goalPreview: string | null;
+  // In-between frames per animated step (a pierce's stroke, a bend's wrap) in
+  // the sequence replay; 0: off (a viewer preference, kept in this browser).
+  subframes: number;
   // Graph: show "thermal" steps (heating, dwell) as their own nodes; when
   // false they fold into a flame badge on the edge between forging steps.
   expandHeating: boolean;
@@ -360,6 +407,10 @@ interface PipelineStore {
   setFieldRangeLocked: (v: boolean) => void;
   setFieldRange: (lo: number, hi: number) => void;
   setShowTools: (v: boolean) => void;
+  setViewGrid: (v: Partial<ViewGrid>) => void;
+  setGoalEditing: (name: string | null) => void;
+  setGoalPreview: (tag: string | null) => void;
+  setSubframes: (n: number) => void;
   setExpandHeating: (v: boolean) => void;
 
   setRun: (run: string) => void;
@@ -564,6 +615,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   tag: "graph",
   cooking: false,
   cookError: null,
+  cookEpoch: 0,
+  meshedNodes: [],
+  replay: null,
+  replayBuilding: false,
   diagnostics: {},
   viewSequence: false,
   layoutRequest: 0,
@@ -592,6 +647,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   fieldMin: 600,
   fieldMax: 1200,
   showTools: true,
+  viewGrid: loadViewGrid(),
+  goalEditing: null,
+  goalPreview: null,
+  subframes: loadSubframes(),
   expandHeating: false,
   pathMetadata: null,
   availableTuningProfiles: [],
@@ -608,6 +667,17 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   setFieldRangeLocked: (v) => set({ fieldRangeLocked: v }),
   setFieldRange: (lo, hi) => set({ fieldMin: lo, fieldMax: hi }),
   setShowTools: (v) => set({ showTools: v }),
+  setViewGrid: (v) => set((s) => {
+    const viewGrid = { ...s.viewGrid, ...v };
+    try { localStorage.setItem(VIEW_GRID_KEY, JSON.stringify(viewGrid)); } catch { /* storage unavailable */ }
+    return { viewGrid };
+  }),
+  setGoalEditing: (name) => set({ goalEditing: name }),
+  setSubframes: (n) => {
+    try { localStorage.setItem(SUBFRAMES_KEY, String(n)); } catch { /* storage unavailable */ }
+    set({ subframes: n });
+  },
+  setGoalPreview: (tag) => set({ goalPreview: tag }),
   setExpandHeating: (v) => set({ expandHeating: v }),
   setViewSequence: (v) => set({ viewSequence: v }),
 
@@ -1051,7 +1121,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       const res = await fetch(`/api/pipeline/${encodeURIComponent(tag)}/cook`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ run, graph, context: goalName ? { goal: goalName } : undefined }),
+        // lazily: every node cooks, but only the ends and the selected node are meshed
+        body: JSON.stringify({ run, graph, context: cookContext(goalName),
+                               view: { nodes: get().selectedNodeId ? [get().selectedNodeId] : [] } }),
       });
       const data: CookResponse = await res.json();
       // A newer cook() call was made while this one was in flight (e.g.
@@ -1070,10 +1142,55 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         ),
         diagnostics: { ...s.diagnostics, ...(data.diagnostics ?? {}) },
         cooking: false,
+        cookEpoch: s.cookEpoch + 1,
+        meshedNodes: data.meshed ?? [],
+        replay: null,
       }));
     } catch (e) {
       if (myRequestId !== cookRequestId) return;
       set({ cookError: String(e), cooking: false });
+    }
+  },
+
+  ensureMeshes: async (nodes) => {
+    const { meshedNodes, cookEpoch, run, tag } = get();
+    const want = nodes.filter((n) => !meshedNodes.includes(n));
+    if (!want.length || cookEpoch === 0) return;
+    set({ meshedNodes: [...meshedNodes, ...want] }); // asked for: not again this cook
+    const undo = () => {
+      if (get().cookEpoch === cookEpoch) set((s) => ({ meshedNodes: s.meshedNodes.filter((n) => !want.includes(n)) }));
+    };
+    try {
+      const res = await fetch(`/api/pipeline/${encodeURIComponent(tag)}/meshes`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run, nodes: want }),
+      });
+      if (!res.ok) undo();
+    } catch {
+      undo();
+    }
+  },
+
+  ensureReplay: async (root) => {
+    const { replay, cookEpoch, subframes, run, tag } = get();
+    if (cookEpoch === 0 || (replay && replay.root === root && replay.epoch === cookEpoch && replay.subframes === subframes)) return;
+    set({ replay: { root, epoch: cookEpoch, subframes }, replayBuilding: true });
+    try {
+      const res = await fetch(`/api/pipeline/${encodeURIComponent(tag)}/meshes`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run, sequence: root, subframes }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // built (not streamed: the viewer would redraw per frame): its viewer fetches it now
+      const { nodes, edges } = get();
+      const programs = programsOf(nodes, edges);
+      const seq = sequenceTag(tag, programs, programs.find((p) => p.root === root));
+      useDataStore.getState().setTagTypes(run, { [seq]: "mesh" });
+      useDataStore.getState().reloadTag(run, seq);
+    } catch (e) {
+      set({ replay: null, cookError: `couldn't build the replay: ${String(e)}` });
+    } finally {
+      const r = get().replay;
+      if (!r || (r.root === root && r.epoch === cookEpoch)) set({ replayBuilding: false });
     }
   },
 
@@ -1273,6 +1390,14 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         },
       };
     });
+    // a node param that refers to an imported node follows it to its new id
+    for (const n of newNodes) {
+      const specs = nodeKinds.find((k) => k.kind === n.data.kind)?.params ?? {};
+      for (const [name, spec] of Object.entries(specs)) {
+        const ref = n.data.params[name];
+        if (spec.type === "node_ref" && typeof ref === "string" && idMap.has(ref)) n.data.params[name] = idMap.get(ref)!;
+      }
+    }
     const newEdges: Edge[] = graph.edges
       .filter((e) => idMap.has(e.source) && idMap.has(e.target))
       .map((e) => ({

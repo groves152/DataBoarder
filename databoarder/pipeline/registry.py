@@ -14,6 +14,7 @@ from typing import Any, Callable, Literal
 
 NodeHandler = Callable[..., Any]
 MeshExporter = Callable[[Any], tuple[Any, Any]]  # value -> (vertices, faces)
+FrameMaker = Callable[[dict[str, Any], dict[str, Any], int], list[Any]]  # (inputs, params, n) -> n values
 # Given a node's own output value, its resolved params, its resolved
 # upstream inputs (e.g. {"state": <value BEFORE this node ran>} -- needed
 # for any diagnostic that compares before/after), an opaque per-cook
@@ -35,7 +36,10 @@ class ParamSpec:
     frontend to render the right control (slider, dropdown, checkbox...)
     with sensible bounds, without hardcoding any domain-specific knowledge."""
 
-    type: Literal["float", "int", "select", "bool"]
+    # "text": a free string; "node_ref": another node of the graph (by id), of
+    # kind `ref_kind` -- the cook hands the handler that node's VALUE (and
+    # cooks it first: a dependency like an input, without an edge).
+    type: Literal["float", "int", "select", "bool", "text", "node_ref"]
     default: Any
     min: float | None = None
     max: float | None = None
@@ -55,6 +59,7 @@ class ParamSpec:
     # A continuous param a gradient optimizer may tune (the frontend shows an
     # "optimize" toggle next to it). Purely a hint; DataBoarder runs nothing.
     optimizable: bool = False
+    ref_kind: str | None = None  # for type == "node_ref": the kind of node it points at
 
     def to_json(self) -> dict[str, Any]:
         d: dict[str, Any] = {"type": self.type, "default": self.default}
@@ -72,6 +77,8 @@ class ParamSpec:
             d["description"] = self.description
         if self.options_meta is not None:
             d["options_meta"] = self.options_meta
+        if self.ref_kind is not None:
+            d["ref_kind"] = self.ref_kind
         if self.optimizable:
             d["optimizable"] = True
         return d
@@ -99,6 +106,12 @@ class NodeSpec:
     # "thermal": a step that only changes temperature/time, which the graph
     # can fold into the edge between its neighbours).
     category: str | None = None
+    # Optional: `frames(inputs, params, n)` -> `n` intermediate values on the
+    # way from this node's input to its output (e.g. a punch part-way in), for
+    # a sequence replay that shows the step happening, not just its result.
+    # `cook()` meshes them (`to_mesh`) when the cook's context asks for
+    # in-between frames (`context["subframes"]`).
+    frames: FrameMaker | None = None
 
     def to_json(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -124,10 +137,11 @@ class PipelineRegistry:
         params: dict[str, ParamSpec] | None = None,
         diagnostics: Diagnostics | None = None,
         category: str | None = None,
+        frames: FrameMaker | None = None,
     ) -> None:
         self._nodes[kind] = NodeSpec(
             kind=kind, handler=handler, inputs=inputs, to_mesh=to_mesh, params=params or {},
-            diagnostics=diagnostics, category=category,
+            diagnostics=diagnostics, category=category, frames=frames,
         )
 
     def get(self, kind: str) -> NodeSpec | None:

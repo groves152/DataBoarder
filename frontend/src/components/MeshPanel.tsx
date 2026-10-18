@@ -1,12 +1,14 @@
 import { Canvas, useThree, useFrame } from "@react-three/fiber";
-import { OrbitControls, GizmoHelper, GizmoViewport } from "@react-three/drei";
+import { OrbitControls, GizmoHelper, GizmoViewport, Grid } from "@react-three/drei";
 import { useMemo, useState, useEffect, useRef, useCallback, useId, type ReactNode, type MutableRefObject } from "react";
 import * as THREE from "three";
+import { toCreasedNormals } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { useTagData } from "@/hooks/useTagData";
 import type { MeshData, MeshTool } from "@/types";
 import { colormap, colormapCss, colormapKind, type ColormapKind } from "@/utils/colormap";
 import { CHROME, useResolvedTheme, type ResolvedTheme } from "@/theme";
 import { GifRecorder, canvasPixels } from "@/utils/gif";
+import { vertexCount } from "@/utils/meshData";
 import { IconButton } from "./icons";
 
 export interface CameraState {
@@ -76,6 +78,8 @@ interface Props {
   color?: string;
   // The exported GIF's file name, without ".gif" (default: from the tag).
   exportName?: string;
+  // A grid in the mesh's own mm (cell size, plane), or none.
+  grid?: { cell: number; plane: GridPlane } | null;
 }
 
 const MAX_OVERLAY = 20;
@@ -114,16 +118,55 @@ function ToolMeshes({ tools, theme }: { tools: MeshTool[]; theme: ResolvedTheme 
   );
 }
 
-function bboxCenter(frame: MeshData): [number, number, number] {
+function bbox(frame: MeshData): { lo: number[]; hi: number[] } {
   const lo = [Infinity, Infinity, Infinity];
   const hi = [-Infinity, -Infinity, -Infinity];
-  for (const v of frame.vertices) {
+  const v = frame.vertices;
+  for (let i = 0; i < v.length; i += 3) {
     for (let k = 0; k < 3; k++) {
-      lo[k] = Math.min(lo[k], v[k]);
-      hi[k] = Math.max(hi[k], v[k]);
+      if (v[i + k] < lo[k]) lo[k] = v[i + k];
+      if (v[i + k] > hi[k]) hi[k] = v[i + k];
     }
   }
+  return { lo, hi };
+}
+
+function bboxCenter(frame: MeshData): [number, number, number] {
+  const { lo, hi } = bbox(frame);
   return [0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]), 0.5 * (lo[2] + hi[2])];
+}
+
+export type GridPlane = "xz" | "xy" | "yz";
+
+// A grid length for its label: inches when the cell is an inch's multiple.
+const gridLength = (mm: number) =>
+  Math.abs(mm / 25.4 - Math.round(mm / 25.4)) < 1e-9 && mm >= 25.4 ? `${Math.round(mm / 25.4)} in` : `${+mm.toFixed(3)} mm`;
+
+const GRID_COLOR: Record<ResolvedTheme, { cell: string; section: string }> = {
+  dark: { cell: "#4a4a44", section: "#7a7a72" },
+  light: { cell: "#bfbdb2", section: "#8c8a7e" },
+};
+
+// A grid in the mesh's own coordinates (drawn inside the same group as the
+// mesh, so its lines fall on whole multiples of `cell` from the mesh's
+// origin -- the grip end, for a goal): just past the mesh on the low side of
+// the plane's normal, a heavier line every 10 cells, fading out a few part
+// lengths away.
+function PartGrid({ frame, cell, plane, theme }: { frame: MeshData; cell: number; plane: GridPlane; theme: ResolvedTheme }) {
+  const { lo, hi } = useMemo(() => bbox(frame), [frame]);
+  const size = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 10 * cell);
+  const gap = 0.002 * size;
+  // drei's Grid lies in its local x-z plane: turned onto the plane asked for
+  const at: Record<GridPlane, { position: [number, number, number]; rotation: [number, number, number] }> = {
+    xz: { position: [0, lo[1] - gap, 0], rotation: [0, 0, 0] },
+    xy: { position: [0, 0, lo[2] - gap], rotation: [Math.PI / 2, 0, 0] },
+    yz: { position: [lo[0] - gap, 0, 0], rotation: [0, 0, Math.PI / 2] },
+  };
+  return (
+    <Grid {...at[plane]} infiniteGrid cellSize={cell} sectionSize={10 * cell} cellThickness={1} sectionThickness={1.6}
+          cellColor={GRID_COLOR[theme].cell} sectionColor={GRID_COLOR[theme].section}
+          fadeDistance={4 * size} fadeStrength={1.5} side={THREE.DoubleSide} />
+  );
 }
 
 function FieldLegend({ name, unit, lo, hi, locked, kind, theme }: {
@@ -149,8 +192,9 @@ function FieldLegend({ name, unit, lo, hi, locked, kind, theme }: {
 
 function computeAutoFitState(frame: MeshData): { camPos: [number, number, number]; dist: number } {
   let maxDist = 1;
-  for (const v of frame.vertices) {
-    const d = Math.hypot(v[0], v[1], v[2]);
+  const v = frame.vertices;
+  for (let i = 0; i < v.length; i += 3) {
+    const d = Math.hypot(v[i], v[i + 1], v[i + 2]);
     if (d > maxDist) maxDist = d;
   }
   const dist = maxDist * 2.5;
@@ -175,14 +219,7 @@ function computeAutoFitState(frame: MeshData): { camPos: [number, number, number
 // longer). `centered`: the mesh is drawn inside <Center>, so aim at the origin;
 // otherwise (overlay) aim at the box center.
 function fitToBox(frame: MeshData, centered: boolean): { position: [number, number, number]; target: [number, number, number]; dist: number } {
-  const lo = [Infinity, Infinity, Infinity];
-  const hi = [-Infinity, -Infinity, -Infinity];
-  for (const v of frame.vertices) {
-    for (let k = 0; k < 3; k++) {
-      lo[k] = Math.min(lo[k], v[k]);
-      hi[k] = Math.max(hi[k], v[k]);
-    }
-  }
+  const { lo, hi } = bbox(frame);
   const half = Math.max(0.5 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]), 1);
   const target: [number, number, number] = centered
     ? [0, 0, 0]
@@ -191,12 +228,24 @@ function fitToBox(frame: MeshData, centered: boolean): { position: [number, numb
   return { position: [target[0] + dist * 0.55, target[1] + dist * 0.65, target[2] + dist * 0.55], target, dist };
 }
 
+// Preset views (the viewport's view buttons): the direction the camera sits
+// in from the part, looking back at it. Y is up on screen throughout; a view
+// straight down y sits a hair off the pole (orbiting stays sane).
+export type ViewPreset = "iso" | "z" | "y" | "x";
+const VIEW_DIRS: Record<ViewPreset, [number, number, number]> = {
+  iso: [0.55, 0.65, 0.55], z: [0, 0, 1], y: [0, 1, 0.002], x: [1, 0, 0],
+};
+export const VIEW_LABELS: Record<ViewPreset, string> = {
+  iso: "Isometric", z: "Down z: the x-y plane (the bend plane)", y: "Down y: the x-z plane",
+  x: "Along x: the bar's section",
+};
+
 function SceneCamera({
-  run, tag, frame, cameraStateRef, externalOrbitRef, refitKey = 0, centered = true,
+  run, tag, frame, cameraStateRef, externalOrbitRef, refitKey = 0, centered = true, view = null,
 }: {
   run: string; tag: string; frame?: MeshData; cameraStateRef?: MutableRefObject<CameraState | null>;
   externalOrbitRef?: MutableRefObject<{ dAzimuth: number; dPolar: number }>;
-  refitKey?: number; centered?: boolean;
+  refitKey?: number; centered?: boolean; view?: { preset: ViewPreset; n: number } | null;
 }) {
   const { camera } = useThree();
   const controls = useThree((s) => s.controls) as ControlsLike | null;
@@ -219,6 +268,26 @@ function SceneCamera({
     // Only on an explicit Fit click -- not when the frame or centering changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refitKey]);
+
+  useEffect(() => {
+    if (!view || !frame) return;
+    const { target, dist } = fitToBox(frame, centered);
+    const d = VIEW_DIRS[view.preset];
+    const len = Math.hypot(d[0], d[1], d[2]);
+    const position: [number, number, number] = [0, 1, 2].map((k) => target[k] + (dist * d[k]) / len) as [number, number, number];
+    camera.position.set(...position);
+    camera.near = Math.max(dist * 0.01, 0.01);
+    camera.far = dist * 20;
+    camera.lookAt(...target);
+    if ("updateProjectionMatrix" in camera) (camera as THREE.PerspectiveCamera).updateProjectionMatrix();
+    if (controls) {
+      controls.target.set(...target);
+      controls.update();
+    }
+    if (cameraStateRef) cameraStateRef.current = { position, target };
+    // Only when a view button is pressed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view?.n]);
 
   useEffect(() => {
     if (cameraStateRef) {
@@ -320,15 +389,28 @@ function SceneCamera({
 // Hands the panel a "render now and read the pixels" function (GIF export).
 // Reading the WebGL canvas right after a render of our own works without
 // preserveDrawingBuffer. The gizmo is drawn in a separate pass, so it stays out.
-function FrameGrabber({ grabRef }: { grabRef: MutableRefObject<(() => ImageData) | null> }) {
+function FrameGrabber({ grabRef, pngRef }: {
+  grabRef: MutableRefObject<(() => ImageData) | null>;
+  pngRef?: MutableRefObject<(() => Promise<Blob | null>) | null>;
+}) {
   const { gl, scene, camera } = useThree();
   useEffect(() => {
     grabRef.current = () => {
       gl.render(scene, camera);
       return canvasPixels(gl.domElement);
     };
-    return () => { grabRef.current = null; };
-  }, [gl, scene, camera, grabRef]);
+    if (pngRef) {
+      // the canvas's pixels at the call (toBlob snapshots them), full resolution
+      pngRef.current = () => {
+        gl.render(scene, camera);
+        return new Promise((resolve) => gl.domElement.toBlob(resolve, "image/png"));
+      };
+    }
+    return () => {
+      grabRef.current = null;
+      if (pngRef) pngRef.current = null;
+    };
+  }, [gl, scene, camera, grabRef, pngRef]);
   return null;
 }
 
@@ -341,6 +423,13 @@ export interface GeoProps {
   transparent: boolean;
 }
 
+const CREASE_ANGLE = (40 * Math.PI) / 180;
+
+// A replay frame's step: whole for a node's own result, fractional for an
+// in-between frame (a pierce part-way in) -- shown as the step it leads to.
+const fmtStep = (step: number) =>
+  Number.isInteger(step) ? String(step) : `${Math.ceil(step)} (${Math.round((step % 1) * 100)}%)`;
+
 export function MeshGeometry({ data, color, opacity, transparent }: GeoProps) {
   // Empty `faces` is the point-cloud sentinel (forge_net's autocook path
   // pushes the raw tracked point cloud with no triangulation -- real
@@ -352,22 +441,20 @@ export function MeshGeometry({ data, color, opacity, transparent }: GeoProps) {
 
   const geometry = useMemo(() => {
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute(
-      "position",
-      new THREE.BufferAttribute(new Float32Array(data.vertices.flat()), 3),
-    );
-    if (!isPointCloud) {
-      geo.setIndex(new THREE.BufferAttribute(new Uint32Array(data.faces.flat()), 1));
-      geo.computeVertexNormals();
-    }
-    if (data.colors) {
-      geo.setAttribute(
-        "color",
-        new THREE.BufferAttribute(new Float32Array(data.colors.flat()), data.colors[0].length),
-      );
-    }
-    return geo;
+    geo.setAttribute("position", new THREE.BufferAttribute(data.vertices, 3));
+    if (data.colors) geo.setAttribute("color", new THREE.BufferAttribute(data.colors, data.colorSize ?? 3));
+    if (isPointCloud) return geo;
+    geo.setIndex(new THREE.BufferAttribute(data.faces, 1));
+    // Smooth across the bar's gentle curvature, sharp at real edges (a hole's
+    // rim, the end caps, die-flattened faces): normals split past the crease.
+    const creased = toCreasedNormals(geo, CREASE_ANGLE);
+    geo.dispose();
+    return creased;
   }, [data, isPointCloud]);
+  // A replay swaps the geometry every frame: free each one's GPU buffers as
+  // it goes (left to the garbage collector, a long replay -- or a GIF export,
+  // which steps through every frame -- runs the GPU out of memory).
+  useEffect(() => () => geometry.dispose(), [geometry]);
 
   if (isPointCloud) {
     return (
@@ -412,6 +499,16 @@ function frameOpacity(i: number, total: number): number {
   return total <= 1 ? 0.7 : 0.12 + 0.63 * (i / (total - 1));
 }
 
+const GIF_MAX_FRAMES = 300;
+
+/** Same shape and tooling (a reheat or a dwell between two strikes looks like the strike before it). */
+function looksSame(a: MeshData, b: MeshData): boolean {
+  if (a.vertices.length !== b.vertices.length || (a.tools?.length ?? 0) !== (b.tools?.length ?? 0)) return false;
+  for (let i = 0; i < a.vertices.length; i++) if (a.vertices[i] !== b.vertices[i]) return false;
+  return (a.tools ?? []).every((t, k) => t.vertices.length === b.tools![k].vertices.length
+    && t.vertices.every((x, i) => x === b.tools![k].vertices[i]));
+}
+
 function sampleFrames(frames: MeshData[], n: number): MeshData[] {
   if (frames.length <= n) return frames;
   const step = (frames.length - 1) / (n - 1);
@@ -422,7 +519,7 @@ function sampleFrames(frames: MeshData[], n: number): MeshData[] {
 
 export function MeshPanel({
   run, tag, overlay, onFrameChange, meshOpacity = 1, cameraState, externalOrbitRef,
-  field = null, fieldRange = null, onFieldsSeen, showTools = true, transport = true, color, exportName,
+  field = null, fieldRange = null, onFieldsSeen, showTools = true, transport = true, color, exportName, grid = null,
 }: Props) {
   const theme = useResolvedTheme();
   const entries = useTagData(run, tag);
@@ -452,6 +549,7 @@ export function MeshPanel({
   const [fps, setFps]           = useState(5);
   const [overlayAll, setOverlay] = useState(false);
   const [refitKey, setRefitKey] = useState(0); // bumped by the "Fit" button
+  const [view, setView] = useState<{ preset: ViewPreset; n: number } | null>(null); // the view buttons
   const intervalRef   = useRef<ReturnType<typeof setInterval> | null>(null);
   const userScrubbing = useRef(false);
   // Unique per MeshPanel instance -- multiple can be mounted at once
@@ -512,28 +610,60 @@ export function MeshPanel({
     setPlaying((p) => !p);
   };
 
-  // GIF export: step through every frame, grab the viewport after each one
-  // is drawn, and save. `gifAt`: the frame being captured (null: idle).
+  // GIF export: step through the frames, grab the viewport after each one is
+  // drawn, and save. A run of frames that look alike (a reheat or a dwell: the
+  // same shape and tooling) is captured once, unless colored by a field; a
+  // long replay is sampled down to `GIF_MAX_FRAMES`. `gifAt`: the frame being
+  // captured, of `gifOf` (null: idle); clicking again cancels.
   const grabRef = useRef<(() => ImageData) | null>(null);
+  const pngRef = useRef<(() => Promise<Blob | null>) | null>(null);
+  const savePng = async () => {
+    const blob = await pngRef.current?.();
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const stamp = currentFrame ? `_step${fmtStep(currentFrame.step).replace(/\W+/g, "")}` : "";
+    Object.assign(document.createElement("a"), {
+      href: url, download: `${(exportName ?? tag.split("/")[0]).replace(/[^\w.-]+/g, "_") || "view"}${stamp}.png`,
+    }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
   const [gifAt, setGifAt] = useState<number | null>(null);
+  const [gifOf, setGifOf] = useState(0);
+  const gifCancel = useRef(false);
   const exportGif = async () => {
+    if (gifAt !== null) {
+      gifCancel.current = true;
+      return;
+    }
     if (!grabRef.current || frames.length === 0) return;
+    gifCancel.current = false;
     setPlaying(false);
     const back = currentStep;
     const nextPaint = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+    const distinct = frames.filter((f, i) => i === 0 || i === frames.length - 1 || !!field || !looksSame(f, frames[i - 1]));
+    const pick = sampleFrames(distinct, GIF_MAX_FRAMES);
+    setGifOf(pick.length);
     const rec = new GifRecorder();
-    for (let i = 0; i < frames.length; i++) {
+    let done = true;
+    for (let i = 0; i < pick.length; i++) {
+      if (gifCancel.current) {
+        done = false;
+        break;
+      }
       setGifAt(i);
-      setCurrentStep(frames[i].step);
+      setCurrentStep(pick[i].step);
       await nextPaint();
       await nextPaint();
       const img = grabRef.current?.();
-      if (!img) break; // the panel went away mid-export
-      rec.add(img, i === frames.length - 1 ? 1500 : Math.round(1000 / fps)); // hold the last frame
+      if (!img) { // the panel went away mid-export
+        done = false;
+        break;
+      }
+      rec.add(img, i === pick.length - 1 ? 1500 : Math.round(1000 / fps)); // hold the last frame
     }
     setCurrentStep(back);
     setGifAt(null);
-    rec.save(`${(exportName ?? tag.split("/")[0]).replace(/[^\w.-]+/g, "_") || "replay"}_replay.gif`);
+    if (done) rec.save(`${(exportName ?? tag.split("/")[0]).replace(/[^\w.-]+/g, "_") || "replay"}_replay.gif`);
   };
 
   const overlayFrames = useMemo(() => sampleFrames(frames, MAX_OVERLAY), [frames]);
@@ -554,7 +684,7 @@ export function MeshPanel({
   // Colored copy of the current frame when a field is selected and present.
   const colored = useMemo(() => {
     const values = field && currentFrame?.fields?.[field];
-    if (!currentFrame || !values || values.length !== currentFrame.vertices.length) return null;
+    if (!currentFrame || !values || values.length !== vertexCount(currentFrame)) return null;
     let lo = Infinity;
     let hi = -Infinity;
     if (fieldRange) {
@@ -583,8 +713,12 @@ export function MeshPanel({
     const kind = colormapKind(field as string, lo, hi);
     const cmap = colormap(kind, theme);
     // vertex colors are linear in three.js; the colormap (and legend) is sRGB
-    const colors = values.map((x) => cmap((x - lo) / span).map((c) => Math.pow(c, 2.2)));
-    return { frame: { ...currentFrame, colors }, lo, hi, kind, unit: currentFrame.field_units?.[field as string] };
+    const colors = new Float32Array(values.length * 3);
+    values.forEach((x, i) => {
+      const c = cmap((x - lo) / span);
+      for (let k = 0; k < 3; k++) colors[3 * i + k] = Math.pow(c[k], 2.2);
+    });
+    return { frame: { ...currentFrame, colors, colorSize: 3 }, lo, hi, kind, unit: currentFrame.field_units?.[field as string] };
   }, [currentFrame, field, fieldRange, theme]);
 
   return (
@@ -596,9 +730,26 @@ export function MeshPanel({
             No mesh data yet
           </div>
         )}
-        <div className="absolute top-2 right-2 z-10">
+        {grid && hasMesh && (
+          <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 pointer-events-none rounded bg-panel/80 border border-border px-1.5 py-0.5 text-[10px] text-gray-400 tabular-nums">
+            grid {gridLength(grid.cell)} · heavy lines every {gridLength(10 * grid.cell)} · {grid.plane[0]}–{grid.plane[1]} plane
+          </div>
+        )}
+        <div className="absolute top-2 right-2 z-10 flex flex-col items-end gap-1">
           <IconButton icon="fit" side="left" label="Fit the view to the current mesh" disabled={!currentFrame}
                       onClick={() => setRefitKey((k) => k + 1)} />
+          <IconButton icon="camera" side="left" label="Save this view as a PNG" disabled={!currentFrame}
+                      onClick={() => void savePng()} />
+          <div className="grid grid-cols-2 gap-0.5" role="group" aria-label="Views">
+            {(["iso", "z", "y", "x"] as ViewPreset[]).map((v) => (
+              <button key={v} disabled={!currentFrame} title={VIEW_LABELS[v]} aria-label={VIEW_LABELS[v]}
+                      onClick={() => setView((cur) => ({ preset: v, n: (cur?.n ?? 0) + 1 }))}
+                      className={`w-[13px] h-[13px] leading-none text-[8px] rounded-sm border border-border bg-panel text-gray-400 hover:border-accent hover:text-gray-100 disabled:opacity-40 ${
+                        view?.preset === v ? "border-accent text-gray-100" : ""}`}>
+                {v === "iso" ? "◇" : v}
+              </button>
+            ))}
+          </div>
         </div>
         {colored && !overlayAll && field && (
           <FieldLegend name={field} unit={colored.unit} lo={colored.lo} hi={colored.hi} locked={!!fieldRange}
@@ -610,7 +761,7 @@ export function MeshPanel({
           <directionalLight position={[5, 8, 5]} intensity={1.2} castShadow />
           <directionalLight position={[-5, -3, -5]} intensity={0.3} />
           <SceneCamera run={run} tag={tag} frame={currentFrame} cameraStateRef={cameraState} externalOrbitRef={externalOrbitRef}
-                       refitKey={refitKey} centered={!overlayAll} />
+                       refitKey={refitKey} centered={!overlayAll} view={view} />
 
           {overlayAll ? (
             // No <Center> in overlay — frames sit in their natural coordinate
@@ -627,6 +778,7 @@ export function MeshPanel({
                 />
               ))}
               {overlay}
+              {grid && currentFrame && <PartGrid frame={currentFrame} cell={grid.cell} plane={grid.plane} theme={theme} />}
             </>
           ) : currentFrame ? (
             // Press preview and tooling rendered INSIDE the same centering
@@ -641,6 +793,7 @@ export function MeshPanel({
               />
               {showTools && currentFrame.tools && <ToolMeshes tools={currentFrame.tools} theme={theme} />}
               {overlay}
+              {grid && <PartGrid frame={currentFrame} cell={grid.cell} plane={grid.plane} theme={theme} />}
             </group>
           ) : (
             // No cooked mesh yet -- still show the preview (uncentered; no
@@ -649,7 +802,7 @@ export function MeshPanel({
             overlay
           )}
 
-          <FrameGrabber grabRef={grabRef} />
+          <FrameGrabber grabRef={grabRef} pngRef={pngRef} />
           <OrbitControls makeDefault />
           <GizmoHelper alignment="bottom-right" margin={[60, 60]}>
             <GizmoViewport axisColors={["#e34948", "#008300", "#2a78d6"]} labelColor={theme === "dark" ? "white" : "black"} />
@@ -667,7 +820,7 @@ export function MeshPanel({
         </button>
 
         <span className="tabular-nums shrink-0 text-gray-500">
-          {frameIdx + 1}/{frames.length} · step {currentFrame?.step ?? 0}
+          {frameIdx + 1}/{frames.length} · step {fmtStep(currentFrame?.step ?? 0)}
         </span>
 
         <input
@@ -714,10 +867,13 @@ export function MeshPanel({
 
         <button
           onClick={exportGif}
-          disabled={frames.length < 2 || overlayAll || gifAt !== null}
-          title="Save the replay as an animated GIF (at this FPS, from the current camera)"
+          disabled={frames.length < 2 || overlayAll}
+          title={gifAt === null
+            ? `Save the replay as an animated GIF (at this FPS, from the current camera; frames that look alike once, `
+              + `at most ${GIF_MAX_FRAMES})`
+            : "Cancel the GIF"}
           className="px-1.5 h-6 rounded border border-border hover:border-accent transition-colors text-gray-300 shrink-0 disabled:opacity-40 tabular-nums">
-          {gifAt === null ? "GIF" : `GIF ${gifAt + 1}/${frames.length}`}
+          {gifAt === null ? "GIF" : `GIF ${gifAt + 1}/${gifOf} ✕`}
         </button>
       </div>
       )}

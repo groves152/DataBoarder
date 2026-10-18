@@ -9,7 +9,9 @@ import { PressPreview, type ToolDims } from "./PressPreview";
 import { PathMenu } from "./PathMenu";
 import { WorkspaceMenu } from "./WorkspaceMenu";
 import { SequenceViewToggle } from "./SequenceViewToggle";
-import { GoalOverlay, GOAL_COLOR } from "./GoalOverlay";
+import { GoalOverlay, GOAL_COLOR, SUBGOAL_COLOR } from "./GoalOverlay";
+import { GoalEditor } from "./GoalEditor";
+import { planViewMeshes, usePlanStore } from "@/stores/planStore";
 import { SidePanel } from "./SidePanel";
 import { ViewportSidebar } from "./ViewportSidebar";
 import { ViewMenu } from "./ViewMenu";
@@ -31,16 +33,30 @@ const SEPARATOR_CLASS =
   "data-[orientation=horizontal]:w-1 data-[orientation=horizontal]:cursor-col-resize " +
   "data-[orientation=vertical]:h-1 data-[orientation=vertical]:cursor-row-resize";
 
+const IN_BETWEEN_FRAMES = 6; // per pierce / bend, when on
+
 export function PipelineView() {
   const {
     run, tag, nodes, nodeKinds, selectedNodeId, cook, cooking, diagnostics, viewSequence,
     goalName, goalVisible, goalOpacity, billetOpacity,
-    meshField, fieldRangeLocked, fieldMin, fieldMax, showTools, setAvailableFields, pinnedPrograms,
+    meshField, fieldRangeLocked, fieldMin, fieldMax, showTools, setAvailableFields, pinnedPrograms, viewGrid,
+    goalPreview, goalEditing, subframes, setSubframes, cookEpoch, ensureMeshes, ensureReplay, replayBuilding,
   } = usePipelineStore();
+  const grid = viewGrid.on ? viewGrid : null;
+  // A goal being edited shows as its preview, in the goal's place
+  const goalTag = goalPreview ?? (goalName ? `${TARGETS_TAG_PREFIX}${goalName}` : null);
   const theme = useResolvedTheme();
   // Several programs in the graph: the replay and stats follow the current one,
   // and pinned ones overlay their final part (in their card's color).
   const { programs, current } = useCurrentProgram();
+  // Meshes are made as they're shown (a lazy cook meshes only each program's
+  // end and the selected node): the node picked, the replay opened.
+  useEffect(() => {
+    if (selectedNodeId && cookEpoch > 0) void ensureMeshes([selectedNodeId]);
+  }, [selectedNodeId, cookEpoch, ensureMeshes]);
+  useEffect(() => {
+    if (viewSequence && current?.root && cookEpoch > 0) void ensureReplay(current.root);
+  }, [viewSequence, current?.root, cookEpoch, subframes, ensureReplay]);
   const currentIndex = current ? programs.indexOf(current) : -1;
   const currentLabel = current ? programLabel(current, currentIndex, (id) => {
     const l = nodes.find((n) => n.id === id)?.data.params.label;
@@ -157,9 +173,9 @@ export function PipelineView() {
   // reference shape, meaningful to see regardless of which step/node is
   // currently shown.
   const goalOverlay = useMemo(() => {
-    if (!goalVisible || !goalName) return undefined;
-    return <GoalOverlay run={TARGETS_RUN} tag={`${TARGETS_TAG_PREFIX}${goalName}`} opacity={goalOpacity} />;
-  }, [goalVisible, goalName, goalOpacity]);
+    if (!goalVisible || !goalTag) return undefined;
+    return <GoalOverlay run={TARGETS_RUN} tag={goalTag} opacity={goalOpacity} />;
+  }, [goalVisible, goalTag, goalOpacity]);
 
   const pinnedOverlay = useMemo(() => {
     const shown = programs.map((p, i) => ({ p, i }))
@@ -170,6 +186,25 @@ export function PipelineView() {
                    color={seriesColor(i, theme)} />
     ))}</>;
   }, [programs, pinnedPrograms, current, run, tag, theme]);
+
+  // The Plan tab's view of a leg or subgoal (see planStore.planViewMeshes): it
+  // takes the viewport until a node is picked or the view is hidden.
+  const planStatus = usePlanStore((s) => s.status);
+  const planView = usePlanStore((s) => s.view);
+  const planRun = usePlanStore((s) => s.run);
+  const setPlanView = usePlanStore((s) => s.setView);
+  const planMeshes = useMemo(() => planViewMeshes(planStatus, planView), [planStatus, planView]);
+  const planSubgoal = planMeshes?.subgoal ?? null;
+  const planGoal = planMeshes?.goal ?? null;
+  const planOverlay = useMemo(() => {
+    if (!planGoal) return undefined;
+    return (
+      <>
+        {planSubgoal && <GoalOverlay run={planRun} tag={planSubgoal} opacity={0.4} color={SUBGOAL_COLOR} />}
+        {goalVisible && <GoalOverlay run={planRun} tag={planGoal} opacity={goalOpacity} />}
+      </>
+    );
+  }, [planSubgoal, planGoal, planRun, goalVisible, goalOpacity]);
 
   const combinedOverlay = useMemo(() => {
     if (!previewOverlay && !goalOverlay && !pinnedOverlay) return undefined;
@@ -198,6 +233,9 @@ export function PipelineView() {
           { label: "Side panel", checked: showTrendPanel, onChange: setShowTrendPanel,
             hint: "Sequence search / optimize / sequence stats" },
           { label: "Node inspector", checked: showInspector, onChange: setShowInspector },
+          { label: "In-between frames", checked: subframes > 0,
+            onChange: (on: boolean) => setSubframes(on ? IN_BETWEEN_FRAMES : 0), // the replay rebuilds (no re-cook)
+            hint: "Sequence view: each pierce and bend shown part-way through, not just before and after" },
         ]} />
         <SequenceViewToggle />
         <div className="ml-auto flex items-center gap-2">
@@ -233,20 +271,69 @@ export function PipelineView() {
                 </>
               )}
               <Panel id="pv-mesh" defaultSize="60" minSize="20">
+                <div className="relative h-full w-full">
+                {viewSequence && replayBuilding && (
+                  <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 rounded border border-border bg-panel/90 px-2 py-1 text-[11px] text-gray-300">
+                    Building the replay…
+                  </div>
+                )}
+                {goalEditing && (
+                  <div className="absolute top-2 left-2 bottom-2 z-20 flex items-start pointer-events-none">
+                    <div className="pointer-events-auto max-h-full flex"><GoalEditor name={goalEditing} /></div>
+                  </div>
+                )}
                 {(() => {
+                  if (goalPreview) {
+                    // A goal being edited (GoalEditor): its preview on its own, at full size
+                    return (
+                      <MeshPanel
+                        key={`goal::${goalPreview}`}
+                        run={TARGETS_RUN}
+                        tag={goalPreview}
+                        color={GOAL_COLOR}
+                        meshOpacity={0.85}
+                        cameraState={cameraStateRef}
+                        transport={false}
+                        grid={grid}
+                      />
+                    );
+                  }
+                  if (planMeshes) {
+                    return (
+                      <div className="relative h-full w-full">
+                        <MeshPanel
+                          key={`plan::${planMeshes.main}`}
+                          run={planRun}
+                          tag={planMeshes.main}
+                          overlay={planOverlay}
+                          color={planMeshes.mainIsMade ? undefined : SUBGOAL_COLOR}
+                          meshOpacity={planMeshes.mainIsMade ? billetOpacity : 0.85}
+                          cameraState={cameraStateRef}
+                          transport={false}
+                          exportName={`plan_${planStatus?.goal ?? "goal"}`}
+                          grid={grid}
+                        />
+                        <div className="absolute top-2 left-2 z-10 max-w-[70%] flex items-start gap-2 bg-panel/85 border border-border rounded px-2 py-1 text-[10px] text-gray-300">
+                          <span><span className="text-gray-500 uppercase tracking-wide mr-1">Plan</span>{planMeshes.caption}</span>
+                          <button onClick={() => setPlanView(null)} title="Back to the graph's view" className="text-gray-500 hover:text-gray-100">✕</button>
+                        </div>
+                      </div>
+                    );
+                  }
                   const meshTag = viewSequence ? sequenceTag(tag, programs, current)
                     : selectedNodeId ? `${tag}/${selectedNodeId}` : null;
-                  if (!meshTag && goalName && goalVisible) {
+                  if (!meshTag && goalTag && goalVisible) {
                     // Nothing selected (or an empty graph): show the goal on its own.
                     return (
                       <MeshPanel
-                        key={`goal::${goalName}`}
+                        key={`goal::${goalTag}`}
                         run={TARGETS_RUN}
-                        tag={`${TARGETS_TAG_PREFIX}${goalName}`}
+                        tag={goalTag}
                         color={GOAL_COLOR}
                         meshOpacity={Math.max(goalOpacity, 0.6)}
                         cameraState={cameraStateRef}
                         transport={false}
+                        grid={grid}
                       />
                     );
                   }
@@ -282,9 +369,11 @@ export function PipelineView() {
                       showTools={showTools}
                       transport={viewSequence}
                       exportName={currentLabel}
+                      grid={grid}
                     />
                   );
                 })()}
+                </div>
               </Panel>
               {/* Independent of whether a node/sequence is currently shown
                   in the mesh viewport -- still useful as an overview with

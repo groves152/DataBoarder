@@ -7,6 +7,16 @@ from typing import Any
 import numpy as np
 
 
+def jsonable(o: Any) -> Any:
+    """`json.dumps(default=...)`: numpy arrays and scalars as lists and
+    numbers (buffered mesh payloads are kept as arrays)."""
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, np.generic):
+        return o.item()
+    raise TypeError(f"{type(o).__name__} is not JSON serializable")
+
+
 def to_numpy(x: Any) -> np.ndarray:
     """Convert jax.Array / torch.Tensor / list / scalar → np.ndarray."""
     if isinstance(x, np.ndarray):

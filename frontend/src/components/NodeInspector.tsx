@@ -127,6 +127,10 @@ export function NodeInspector() {
                 onChange={(v) => updateNodeParam(node.id, name, v)}
                 formatValue={name === "phi" ? formatAngle : undefined}
                 ticks={ticks}
+                refOptions={spec.type === "node_ref" ? nodes
+                  .filter((n) => n.id !== node.id && (!spec.ref_kind || n.data.kind === spec.ref_kind))
+                  .map((n) => ({ value: n.id, label: typeof n.data.params.label === "string" && n.data.params.label
+                    ? n.data.params.label : n.id })) : undefined}
               />
             );
             let control = slider();

@@ -1,7 +1,9 @@
 // Types for the node-graph pipeline editor. Mirrors the JSON shapes
 // `databoarder/pipeline/{registry,graph}.py` produce/consume.
 
-export type ParamType = "float" | "int" | "select" | "bool";
+// "text": a free string; "node_ref": the id of another node in the graph, of
+// kind `ref_kind` (the server hands the node's handler that node's value).
+export type ParamType = "float" | "int" | "select" | "bool" | "text" | "node_ref";
 export type ParamValue = number | string | boolean;
 
 export interface ParamSpec {
@@ -21,6 +23,7 @@ export interface ParamSpec {
   // A continuous param a gradient optimizer may tune (the inspector shows an
   // "optimize" toggle next to it).
   optimizable?: boolean;
+  ref_kind?: string;
 }
 
 export interface NodeKindSchema {
@@ -57,6 +60,7 @@ export interface CookResponse {
   ok: boolean;
   node_ids?: string[];
   mesh_node_ids?: string[];
+  meshed?: string[]; // the node meshes this cook pushed (a lazy cook: each program's end, the viewed node)
   diagnostics?: Record<string, NodeDiagnostics>;
   error?: string;
 }

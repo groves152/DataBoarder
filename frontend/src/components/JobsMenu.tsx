@@ -24,7 +24,7 @@ interface JobSummary {
 }
 
 const TERMINAL = ["done", "stopped", "error"];
-const KIND_LABEL: Record<string, string> = { search: "Sequence search", optimize: "Optimize" };
+const KIND_LABEL: Record<string, string> = { search: "Sequence search", optimize: "Optimize", plan: "Plan" };
 
 const label = (j: JobSummary) =>
   `${KIND_LABEL[j.kind] ?? j.kind}${j.method ? ` · ${j.method.replace(/_/g, " ")}` : j.strategy ? ` · ${j.strategy}` : ""}` +

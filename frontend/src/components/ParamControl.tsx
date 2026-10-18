@@ -9,7 +9,7 @@ import type { ParamSpec, ParamValue } from "@/types/pipeline";
 const THUMB_PX = 16;
 
 export function ParamControl({
-  name, spec, value, onChange, formatValue, ticks,
+  name, spec, value, onChange, formatValue, ticks, refOptions,
 }: {
   name: string;
   spec: ParamSpec;
@@ -23,9 +23,35 @@ export function ParamControl({
   // preset): it snaps between them, with a labelled bullet under each (click
   // one to jump there). Assumed evenly spaced from `spec.min`.
   ticks?: number[];
+  // For a "node_ref" param: the graph's nodes it may point at.
+  refOptions?: { value: string; label: string }[];
 }) {
   const label = spec.label ?? name;
   const title = spec.description;
+
+  if (spec.type === "node_ref") {
+    const opts = refOptions ?? [];
+    return (
+      <label className="flex flex-col gap-1 text-xs" title={title}>
+        <span className="text-gray-400">{label}</span>
+        <select value={String(value ?? "")} onChange={(e) => onChange(e.target.value)}
+                className="bg-surface border border-border rounded px-1.5 py-1 text-gray-200">
+          <option value="">{opts.length ? "— none —" : "— none in the graph —"}</option>
+          {opts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </label>
+    );
+  }
+
+  if (spec.type === "text") {
+    return (
+      <label className="flex flex-col gap-1 text-xs" title={title}>
+        <span className="text-gray-400">{label}</span>
+        <input value={String(value ?? "")} onChange={(e) => onChange(e.target.value)}
+               className="bg-surface border border-border rounded px-1.5 py-1 text-gray-200" />
+      </label>
+    );
+  }
 
   if (spec.type === "bool") {
     return (

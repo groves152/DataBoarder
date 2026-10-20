@@ -821,6 +821,7 @@ export function MeshPanel({
 
         <span className="tabular-nums shrink-0 text-gray-500">
           {frameIdx + 1}/{frames.length} · step {fmtStep(currentFrame?.step ?? 0)}
+          {currentFrame?.label ? <span className="text-gray-400"> · {currentFrame.label}</span> : null}
         </span>
 
         <input

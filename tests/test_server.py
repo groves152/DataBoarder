@@ -264,3 +264,99 @@ async def test_a_node_ref_param_hands_over_the_referenced_nodes_value(buf):
         assert calls == [10.0, 20.0]  # its goal changed: it cooks again
         # programs stay the edge-joined chains (a reference isn't an edge)
         assert sorted(map(tuple, (p["node_ids"] for p in r["programs"]))) == [("s", "c"), ("t",)]
+
+
+def _chain_registry(calls=None):
+    from databoarder.pipeline import ParamSpec, PipelineRegistry
+
+    reg = PipelineRegistry()
+    tri = lambda v: (np.full((3, 3), float(v)), np.array([[0, 1, 2]]))  # noqa: E731
+
+    def add(state, by=1.0):
+        if calls is not None:
+            calls.append(by)
+        return state + by
+
+    reg.register("stock", lambda value=0.0: value, to_mesh=tri, params={"value": ParamSpec(type="float", default=0.0)})
+    reg.register("add", add, inputs=("state",), to_mesh=tri, params={"by": ParamSpec(type="float", default=1.0)})
+    return reg, tri
+
+
+@pytest.mark.asyncio
+async def test_a_second_input_is_a_side_input_not_part_of_the_program(buf):
+    # A node's first input carries the program on; another (a controller's
+    # goal) joins its source to no program: the replay is the chain alone.
+    reg, tri = _chain_registry()
+    reg.register("toward", lambda state, goal: state + 0.5 * (goal - state), inputs=("state", "goal"), to_mesh=tri)
+    graph = {"nodes": [{"id": "t", "kind": "stock", "params": {"value": 10.0}},
+                       {"id": "s", "kind": "stock", "params": {}},
+                       {"id": "c", "kind": "toward", "params": {}}],
+             "edges": [{"source": "s", "target": "c", "target_input": "state"},
+                       {"source": "t", "target": "c", "target_input": "goal"}]}
+    app = create_app(buf, PluginRegistry(), reg)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = (await c.post("/api/pipeline/g/cook", json={"graph": graph})).json()
+        assert sorted(map(tuple, (p["node_ids"] for p in r["programs"]))) == [("s", "c"), ("t",)]
+        seq = (await c.get("/api/data", params={"tag": "g/__sequence__/s", "run": "default"})).json()["entries"]
+        assert [e["data"]["node_id"] for e in seq] == ["s", "c"]
+        assert seq[-1]["data"]["vertices"][0][0] == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_node_keeps_its_value_until_unfrozen(buf):
+    calls = []
+    reg, _ = _chain_registry(calls)
+
+    def graph(v, frozen):
+        return {"nodes": [{"id": "s", "kind": "stock", "params": {"value": v}},
+                          {"id": "a", "kind": "add", "params": {"by": 1.0}, "frozen": frozen},
+                          {"id": "b", "kind": "add", "params": {"by": 2.0}}],
+                "edges": [{"source": "s", "target": "a"}, {"source": "a", "target": "b"}]}
+
+    app = create_app(buf, PluginRegistry(), reg)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = (await c.post("/api/pipeline/g/cook", json={"graph": graph(0.0, True), "view": {"nodes": []}})).json()
+        assert calls == [1.0, 2.0] and r["frozen"] == {"a": {"stale": False}}
+        # upstream changes: the frozen node holds (and nothing after it re-cooks), flagged stale
+        r = (await c.post("/api/pipeline/g/cook", json={"graph": graph(5.0, True), "view": {"nodes": ["b"]}})).json()
+        assert calls == [1.0, 2.0] and r["frozen"] == {"a": {"stale": True}}
+        mesh = (await c.get("/api/data", params={"tag": "g/b", "run": "default"})).json()["entries"][0]["data"]
+        assert mesh["vertices"][0][0] == pytest.approx(3.0)
+        # unfrozen: it cooks from what's upstream now
+        r = (await c.post("/api/pipeline/g/cook", json={"graph": graph(5.0, False), "view": {"nodes": ["b"]}})).json()
+        assert calls == [1.0, 2.0, 1.0, 2.0] and r["frozen"] == {}
+        mesh = (await c.get("/api/data", params={"tag": "g/b", "run": "default"})).json()["entries"][0]["data"]
+        assert mesh["vertices"][0][0] == pytest.approx(8.0)
+
+
+@pytest.mark.asyncio
+async def test_a_node_with_actions_replays_lists_and_bakes_them(buf):
+    # A controller-like node: its value is three "add" actions applied to its
+    # input. The replay shows each action as a step; its actions list, show
+    # the part after any one; and the program bakes into plain add nodes.
+    reg, tri = _chain_registry()
+    acts = lambda value, params, inputs: [  # noqa: E731
+        {"kind": "add", "params": {"by": 1.0}, "label": f"hit {k + 1}"} for k in range(3)]
+    replay = lambda value, params, inputs: (inputs["state"] + k for k in range(1, 4))  # noqa: E731
+    reg.register("ctrl", lambda state: state + 3, inputs=("state",), to_mesh=tri, actions=acts, replay=replay)
+    assert reg.get("ctrl").to_json()["actions"] is True
+    graph = {"nodes": [{"id": "s", "kind": "stock", "params": {"value": 10.0}}, {"id": "c", "kind": "ctrl", "params": {}},
+                       {"id": "d", "kind": "add", "params": {"by": 5.0}}],
+             "edges": [{"source": "s", "target": "c"}, {"source": "c", "target": "d"}]}
+    app = create_app(buf, PluginRegistry(), reg)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        await c.post("/api/pipeline/g/cook", json={"graph": graph})
+        seq = (await c.get("/api/data", params={"tag": "g/__sequence__", "run": "default"})).json()["entries"]
+        assert [e["data"]["step"] for e in seq] == pytest.approx([0, 1 / 3, 2 / 3, 1, 2])
+        assert [e["data"]["vertices"][0][0] for e in seq] == pytest.approx([10, 11, 12, 13, 18])
+        assert [e["data"].get("label") for e in seq[1:3]] == ["hit 1", "hit 2"]
+        r = (await c.post("/api/pipeline/g/actions", json={"node": "c"})).json()
+        assert [a["label"] for a in r["actions"]] == ["hit 1", "hit 2", "hit 3"]
+        r = (await c.post("/api/pipeline/g/action", json={"node": "c", "index": 1})).json()
+        assert r["ok"] and r["tag"] == "g/c/@action"
+        mesh = (await c.get("/api/data", params={"tag": "g/c/@action", "run": "default"})).json()["entries"]
+        assert len(mesh) == 1 and mesh[0]["data"]["vertices"][0][0] == pytest.approx(12.0)
+        assert (await c.post("/api/pipeline/g/action", json={"node": "c", "index": 3})).status_code == 400
+        r = (await c.post("/api/pipeline/g/bake", json={})).json()
+        assert r["ok"] and r["path"]["root"]["kind"] == "stock" and r["path"]["metadata"]["baked"] == ["c"]
+        assert [(s["kind"], s["params"]["by"]) for s in r["path"]["steps"]] == [("add", 1.0)] * 3 + [("add", 5.0)]

@@ -7,7 +7,7 @@ import { ParamControl } from "./ParamControl";
 // "fill_heats": insert reheats where the program would forge too cold),
 // loads the rewritten path and shows what changed.
 export function TransformDialog({ schema, onClose }: { schema: GeneratorSchema; onClose: () => void }) {
-  const exportPath = usePipelineStore((s) => s.exportPath);
+  const exportProgram = usePipelineStore((s) => s.exportProgram);
   const loadPath = usePipelineStore((s) => s.loadPath);
   const [params, setParams] = useState<Record<string, ParamValue>>(() =>
     Object.fromEntries(Object.entries(schema.params).map(([k, spec]) => [k, spec.default])),
@@ -17,9 +17,10 @@ export function TransformDialog({ schema, onClose }: { schema: GeneratorSchema; 
   const [report, setReport] = useState<Record<string, unknown>[] | null>(null);
 
   async function handleRun() {
-    const path = exportPath();
+    // the current program as a path (its controllers baked into their steps)
+    const { path, error: why } = await exportProgram();
     if (!path) {
-      setError("The graph must be a single linear chain (a path) to transform.");
+      setError(why ?? "The graph must be a single linear chain (a path) to transform.");
       return;
     }
     setRunning(true);

@@ -1,4 +1,6 @@
 import { usePipelineStore, PHI_SYMMETRY_PRESETS, phiStep, type PhiSymmetry } from "@/stores/pipelineStore";
+import type { ParamSpec } from "@/types/pipeline";
+import { NodeActions, NodeRows } from "./NodeActions";
 import { ParamControl } from "./ParamControl";
 import { TuningPanel } from "./TuningPanel";
 import { formatRadiansAsPi } from "@/utils/angleFormat";
@@ -23,7 +25,7 @@ const SYMMETRY_SHORT: Record<PhiSymmetry, string> = { free: "Free", square: "4",
 export function NodeInspector() {
   const {
     nodes, nodeKinds, selectedNodeId, updateNodeParam, cooking, cookError, diagnostics, phiSymmetry, setNodeSymmetry,
-    copiedNodes, copyNodes, paste,
+    copiedNodes, copyNodes, paste, availableGoals, setFrozen,
   } = usePipelineStore();
   const node = nodes.find((n) => n.id === selectedNodeId);
   const knobs = useOptimizeStore((s) => s.knobs);
@@ -40,6 +42,81 @@ export function NodeInspector() {
   const schema = nodeKinds.find((k) => k.kind === node.data.kind);
   const nodeDiag = diagnostics[node.id];
   const capped = Boolean(nodeDiag?.capped);
+  // Controlled globally now -- "force_correct_closure" via ViewportSidebar's
+  // "Physical press limit" toggle, the material params via the Tuning tab --
+  // so they're left out of the per-param controls; a select listing a set the
+  // app keeps (the goal meshes) gets its options here.
+  const paramEntries: [string, ParamSpec][] = schema ? Object.entries(schema.params)
+    .filter(([name]) => !GLOBALLY_CONTROLLED_PARAMS.has(name))
+    .map(([name, spec]) => [name, spec.options_source === "goals" ? { ...spec, options: ["", ...availableGoals] } : spec])
+    : [];
+  const renderParam = ([name, spec]: [string, ParamSpec]) => {
+    // Still a SLIDER (a dropdown here was reported as "no fun,"
+    // and dragging beats picking from a list for fast iteration).
+    // The node's symmetry preset makes it snap to evenly spaced
+    // stops (e.g. every pi/2 for "square"), each a labelled bullet;
+    // "free" is the schema's smooth 0.01 rad step. min/max stay the
+    // schema's full 0-2pi either way.
+    const slider = (ticks?: number[]) => (
+      <ParamControl
+        key={name}
+        name={name}
+        spec={spec}
+        value={node.data.params[name] ?? spec.default}
+        onChange={(v) => updateNodeParam(node.id, name, v)}
+        formatValue={name === "phi" ? formatAngle : undefined}
+        ticks={ticks}
+        refOptions={spec.type === "node_ref" ? nodes
+          .filter((n) => n.id !== node.id && (!spec.ref_kind || n.data.kind === spec.ref_kind))
+          .map((n) => ({ value: n.id, label: typeof n.data.params.label === "string" && n.data.params.label
+            ? n.data.params.label : n.id })) : undefined}
+      />
+    );
+    let control = slider();
+    if (name === "phi") {
+      const sym = (node.data.symmetry as PhiSymmetry | undefined) ?? phiSymmetry;
+      const step = phiStep(sym);
+      const lo = spec.min ?? 0;
+      const hi = spec.max ?? 2 * Math.PI;
+      const ticks = step === null ? undefined
+        : Array.from({ length: Math.floor((hi - lo) / step + 1e-6) + 1 }, (_, i) => lo + i * step);
+      control = (
+        <div key={name} className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-1 text-[10px]" title="Strike symmetry: the angles this strike snaps to (new strikes inherit the last pick). Each strike is two-sided, so N faces need N/2 angles.">
+            <span className="text-gray-500 mr-1">Symmetry</span>
+            {(Object.keys(PHI_SYMMETRY_PRESETS) as PhiSymmetry[]).map((k) => (
+              <button
+                key={k}
+                onClick={() => setNodeSymmetry(node.id, k)}
+                title={PHI_SYMMETRY_PRESETS[k].label}
+                className={`px-1.5 py-0.5 rounded border transition-colors ${
+                  k === sym ? "bg-accent border-accent text-white" : "border-border text-gray-400 hover:border-accent"}`}
+              >
+                {SYMMETRY_SHORT[k]}
+              </button>
+            ))}
+          </div>
+          {slider(ticks)}
+        </div>
+      );
+    }
+    if (!spec.optimizable) return control;
+    const on = knobs.some((k) => k.nodeId === node.id && k.param === name);
+    return (
+      <div key={name} className="flex items-start gap-1.5">
+        <button
+          onClick={() => toggleKnob(node.id, name)}
+          title={on ? "A knob for the optimizer (click to remove)" : "Let the optimizer tune this param"}
+          className={`mt-0.5 w-4 h-4 shrink-0 rounded-full border text-[9px] leading-none flex items-center justify-center transition-colors ${
+            on ? "bg-accent border-accent text-white" : "border-border text-gray-500 hover:border-accent"
+          }`}
+        >
+          ◎
+        </button>
+        <div className="flex-1 min-w-0">{control}</div>
+      </div>
+    );
+  };
 
   return (
     <div className="h-full flex flex-col bg-panel">
@@ -50,6 +127,15 @@ export function NodeInspector() {
             <div className="text-sm text-gray-200 font-medium">{node.id}</div>
           </div>
           <div className="flex gap-1 shrink-0">
+            <button
+              onClick={() => setFrozen(node.id, !node.data.frozen)}
+              title={node.data.frozen ? "Frozen: it keeps its result whatever changes before it. Click to let it cook again."
+                : "Freeze: keep its result as it is now, whatever changes before it (nothing after it re-cooks either)"}
+              className={`text-[10px] px-1.5 py-1 rounded border transition-colors ${node.data.frozen
+                ? "bg-sky-500/20 border-sky-400 text-sky-200" : "bg-surface border-border text-gray-300 hover:border-accent hover:text-gray-100"}`}
+            >
+              {node.data.frozen ? "❄ Frozen" : "Freeze"}
+            </button>
             <button
               onClick={copyNodes}
               title="Copy this node's params (Ctrl/Cmd+C)"
@@ -103,84 +189,22 @@ export function NodeInspector() {
       )}
 
       <div className="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-4">
-        {schema && Object.entries(schema.params)
-          // Controlled globally now -- "force_correct_closure" via
-          // ViewportSidebar's "Physical press limit" toggle, the material
-          // params via the Tuning tab -- no per-node override left for
-          // any of these, so they're excluded from this generic
-          // per-param render loop rather than shown as editable (but
-          // actually ignored) controls here.
-          .filter(([name]) => !GLOBALLY_CONTROLLED_PARAMS.has(name))
-          .map(([name, spec]) => {
-            // Still a SLIDER (a dropdown here was reported as "no fun,"
-            // and dragging beats picking from a list for fast iteration).
-            // The node's symmetry preset makes it snap to evenly spaced
-            // stops (e.g. every pi/2 for "square"), each a labelled bullet;
-            // "free" is the schema's smooth 0.01 rad step. min/max stay the
-            // schema's full 0-2pi either way.
-            const slider = (ticks?: number[]) => (
-              <ParamControl
-                key={name}
-                name={name}
-                spec={spec}
-                value={node.data.params[name] ?? spec.default}
-                onChange={(v) => updateNodeParam(node.id, name, v)}
-                formatValue={name === "phi" ? formatAngle : undefined}
-                ticks={ticks}
-                refOptions={spec.type === "node_ref" ? nodes
-                  .filter((n) => n.id !== node.id && (!spec.ref_kind || n.data.kind === spec.ref_kind))
-                  .map((n) => ({ value: n.id, label: typeof n.data.params.label === "string" && n.data.params.label
-                    ? n.data.params.label : n.id })) : undefined}
-              />
-            );
-            let control = slider();
-            if (name === "phi") {
-              const sym = (node.data.symmetry as PhiSymmetry | undefined) ?? phiSymmetry;
-              const step = phiStep(sym);
-              const lo = spec.min ?? 0;
-              const hi = spec.max ?? 2 * Math.PI;
-              const ticks = step === null ? undefined
-                : Array.from({ length: Math.floor((hi - lo) / step + 1e-6) + 1 }, (_, i) => lo + i * step);
-              control = (
-                <div key={name} className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-1 text-[10px]" title="Strike symmetry: the angles this strike snaps to (new strikes inherit the last pick). Each strike is two-sided, so N faces need N/2 angles.">
-                    <span className="text-gray-500 mr-1">Symmetry</span>
-                    {(Object.keys(PHI_SYMMETRY_PRESETS) as PhiSymmetry[]).map((k) => (
-                      <button
-                        key={k}
-                        onClick={() => setNodeSymmetry(node.id, k)}
-                        title={PHI_SYMMETRY_PRESETS[k].label}
-                        className={`px-1.5 py-0.5 rounded border transition-colors ${
-                          k === sym ? "bg-accent border-accent text-white" : "border-border text-gray-400 hover:border-accent"}`}
-                      >
-                        {SYMMETRY_SHORT[k]}
-                      </button>
-                    ))}
-                  </div>
-                  {slider(ticks)}
-                </div>
-              );
-            }
-            if (!spec.optimizable) return control;
-            const on = knobs.some((k) => k.nodeId === node.id && k.param === name);
-            return (
-              <div key={name} className="flex items-start gap-1.5">
-                <button
-                  onClick={() => toggleKnob(node.id, name)}
-                  title={on ? "A knob for the optimizer (click to remove)" : "Let the optimizer tune this param"}
-                  className={`mt-0.5 w-4 h-4 shrink-0 rounded-full border text-[9px] leading-none flex items-center justify-center transition-colors ${
-                    on ? "bg-accent border-accent text-white" : "border-border text-gray-500 hover:border-accent"
-                  }`}
-                >
-                  ◎
-                </button>
-                <div className="flex-1 min-w-0">{control}</div>
-              </div>
-            );
-          })}
+        {paramEntries.filter(([, spec]) => !spec.advanced).map(renderParam)}
+        {paramEntries.some(([, spec]) => spec.advanced) && (
+          <details className="text-xs text-gray-400">
+            <summary className="cursor-pointer select-none text-gray-500 hover:text-gray-300">
+              Advanced ({paramEntries.filter(([, spec]) => spec.advanced).length})
+            </summary>
+            <div className="mt-3 flex flex-col gap-4">
+              {paramEntries.filter(([, spec]) => spec.advanced).map(renderParam)}
+            </div>
+          </details>
+        )}
         {!schema && (
           <div className="text-xs text-gray-500">Unknown node kind — no schema loaded.</div>
         )}
+        {Array.isArray(nodeDiag?.rows) && <NodeRows rows={nodeDiag.rows as [string, unknown][]} idle={nodeDiag?.idle as string | undefined} />}
+        {schema?.actions && node.data.cooked && <NodeActions nodeId={node.id} />}
         {node.data.kind === "slab_stock" && (
           <div className="border-t border-border pt-4">
             <TuningPanel rootId={node.id} />

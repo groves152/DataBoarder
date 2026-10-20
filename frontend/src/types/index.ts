@@ -28,8 +28,9 @@ export interface MeshData {
   // tooling acting on the part at this step (dies, punch, induction coil).
   tools?: MeshTool[];
   // Only set on a pipeline's "{tag}/__sequence__" tag -- which graph node
-  // this step's mesh came from.
+  // this step's mesh came from, and (a controller's action) which step it is.
   node_id?: string;
+  label?: string;
 }
 export interface MeshTool {
   vertices: Float32Array;

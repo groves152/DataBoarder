@@ -24,11 +24,20 @@ export interface ParamSpec {
   // "optimize" toggle next to it).
   optimizable?: boolean;
   ref_kind?: string;
+  // A rarely-changed setting: the inspector folds it away under "Advanced".
+  advanced?: boolean;
+  // A select whose options are a list the app keeps ("goals": the goal meshes).
+  options_source?: string;
 }
 
 export interface NodeKindSchema {
   kind: string;
   inputs: string[];
+  // Inputs that may be left unconnected (a controller not yet given its goal).
+  optional?: string[];
+  // A node that decides its own steps (a controller): its actions can be
+  // listed, shown one at a time, replayed, and baked into plain steps.
+  actions?: boolean;
   params: Record<string, ParamSpec>;
   // Optional grouping from the server, e.g. "thermal": a step that only
   // changes temperature/time, which the graph may fold into an edge.
@@ -43,6 +52,8 @@ export interface PipelineNodeData extends Record<string, unknown> {
   // A strike's angle symmetry (a PHI_SYMMETRY_PRESETS key): which angles its
   // phi slider snaps to. UI only, never cooked. Unset: the session default.
   symmetry?: string;
+  // Frozen: keeps the result it had when frozen, whatever changes before it.
+  frozen?: boolean;
 }
 
 export interface PipelineEdgeSpec {
@@ -62,7 +73,23 @@ export interface CookResponse {
   mesh_node_ids?: string[];
   meshed?: string[]; // the node meshes this cook pushed (a lazy cook: each program's end, the viewed node)
   diagnostics?: Record<string, NodeDiagnostics>;
+  // Each frozen node kept its held result: stale = what's before it changed since.
+  frozen?: Record<string, { stale: boolean }>;
   error?: string;
+}
+
+// A node's badge (from its diagnostics' `badges`): a short fact on its card.
+export interface NodeBadge { text: string; tone?: "ok" | "bad" | "warn" | "info"; title?: string }
+
+// One of a node's actions (a controller's step): a node kind and its params,
+// plus display columns.
+export interface NodeAction {
+  kind: string;
+  params: Record<string, ParamValue>;
+  label?: string;
+  what?: string;
+  load_kN?: number;
+  cycle?: number | string;
 }
 
 // A "path": a root node (no inputs) plus a linear chain of step nodes,
@@ -134,6 +161,7 @@ export interface GraphNodeJson {
   // without them is laid out fresh.
   position?: { x: number; y: number };
   symmetry?: string;
+  frozen?: boolean;
 }
 
 export interface GraphJson {

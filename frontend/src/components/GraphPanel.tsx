@@ -7,7 +7,7 @@ import { HeatingEdge, type HeatingEdgeData } from "./HeatingEdge";
 import { RadialMenu } from "./RadialMenu";
 import { Icon, IconButton } from "./icons";
 import { layoutGraph } from "@/utils/graphLayout";
-import { programLabel, programsOf } from "@/utils/programs";
+import { primaryEdges, programLabel, programsOf } from "@/utils/programs";
 import { ProgramCard, type ProgramCardData } from "./ProgramCard";
 import { CHROME, seriesColor, useResolvedTheme } from "@/theme";
 import type { PipelineNodeData } from "@/types/pipeline";
@@ -19,6 +19,7 @@ const FIT = { padding: 0.15, duration: 250, maxZoom: 1 };
 const CARD_W = 270;
 const CARD_H = 150;
 const edgeTypes = { heating: HeatingEdge };
+const SIDE_EDGE = { stroke: "#fbbf24", strokeDasharray: "5 4", opacity: 0.85 };
 
 // Folds runs of "thermal" nodes (category from the server: heating, dwell --
 // steps that change only temperature/time) out of view: each edge into such a
@@ -95,7 +96,7 @@ function GraphCanvas() {
     () => new Set([...thermalKinds].filter((k) => k.includes("heat"))), [thermalKinds]);
   // The hierarchy (utils/programs): one card per program, or the steps --
   // every program's, or only the one dived into (plus any loose nodes).
-  const programs = useMemo(() => programsOf(nodes, edges), [nodes, edges]);
+  const programs = useMemo(() => programsOf(nodes, primaryEdges(nodes, edges, nodeKinds)), [nodes, edges, nodeKinds]);
   const focused = programs.find((p) => p.root === focusedProgram);
   // Cards' dragged positions and measured sizes, by program root (React Flow
   // hides a node it gets without its `measured` size until it re-measures).
@@ -136,7 +137,9 @@ function GraphCanvas() {
   const view = useMemo((): { nodes: Node[]; edges: Edge[] } => {
     if (programsLevel) return { nodes: cards, edges: [] };
     const folded = expandHeating ? { nodes, edges } : foldThermal(nodes, edges, thermalKinds, heatingKinds);
-    const all = { nodes: folded.nodes, edges: [...folded.edges, ...refEdges] };
+    // an edge into a side input (a controller's goal) is drawn dashed, as it doesn't carry the program on
+    const styled = folded.edges.map((e) => (e.targetHandle && e.targetHandle !== "state" ? { ...e, style: SIDE_EDGE } : e));
+    const all = { nodes: folded.nodes, edges: [...styled, ...refEdges] };
     if (!focused) return all;
     const shown = new Set([...focused.nodeIds, ...programs.filter((p) => p.nodeIds.length === 1).map((p) => p.root)]);
     return {

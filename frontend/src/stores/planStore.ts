@@ -1,14 +1,14 @@
 // State of the side panel's "Plan" tab: the selected goal mesh decomposed into
 // the operations that make it (server: forge_genie's /api/plan/*, forge-control's
-// fit -> decompose -> run_plan), and run forward leg by leg. A leg (or a
-// subgoal) can be shown in the viewport -- what the chain made against the
-// shape that leg should make -- and the chain's program opened into the graph
-// up to any leg.
+// fit -> decompose), each group with its subgoal (shown in the viewport on
+// click). The plan goes into the graph as a chain of controller nodes, each
+// aimed at its group's Subgoal node through its goal input -- cooking that
+// chain is running the plan forward.
 import { create } from "zustand";
 import { usePipelineStore } from "@/stores/pipelineStore";
 import { type FieldSpec, type SettingValue, TERMINAL, useSearchStore } from "@/stores/searchStore";
 import { toast } from "@/stores/toastStore";
-import type { GraphJson, PathJson } from "@/types/pipeline";
+import type { GraphJson } from "@/types/pipeline";
 
 export interface PlanLeg {
   index: number;
@@ -24,13 +24,6 @@ export interface PlanLeg {
 
 export interface PlanShape { index: number; name: string; tag: string }
 
-export interface Surface {
-  made_to_goal_mean: number;
-  made_to_goal_p95: number;
-  goal_to_made_mean: number;
-  goal_to_made_p95: number;
-}
-
 export interface PlanInfo {
   goal_tag: string; // the goal mesh as held (seated at the stock's grip)
   seat: { offset_mm: number; tilt_deg: number };
@@ -38,23 +31,12 @@ export interface PlanInfo {
   shapes: PlanShape[];
   legs: PlanLeg[];
   notes: string[];
-  stock: { radius: number; length: number; source: "graph" | "suggested"; why: string };
+  // standard: the D38.1 bar, as long as the part needs (`workable_mm` past the held end, of `max_workable_mm`)
+  stock: { radius: number; length: number; source: "standard" | "graph" | "preform"; why: string;
+           workable_mm: number; max_workable_mm: number };
   stock_suggested: { radius: number; length: number };
   features: { holes: number; bends: number; flats: number; slit: boolean };
 }
-
-export interface LegRun {
-  index: number;
-  steps: number;
-  hits: number;
-  feasible: boolean;
-  seconds: number;
-  result: string;
-  made_tag: string;
-  vs_subgoal: Surface | null; // the last leg of a group: the part against the group's subgoal
-}
-
-export interface PlanRun { legs: LegRun[]; surface: Surface | null; steps: number; hits: number; complete: boolean }
 
 export interface PlanStatus {
   job_id: string;
@@ -68,12 +50,11 @@ export interface PlanStatus {
   best_loss?: number;
   error?: string;
   plan?: PlanInfo;
-  run?: PlanRun;
 }
 
-// What the viewport shows for the plan: a leg (the part after it, against its
-// subgoal) or a subgoal on its own. null: the graph's own view.
-export type PlanView = { leg: number } | { shape: number } | null;
+// What the viewport shows for the plan: a subgoal (the shape a group makes).
+// null: the graph's own view.
+export type PlanView = { shape: number } | null;
 
 const DONE_NAME: Record<PlanLeg["op"], string> = {
   cog: "straight preform", slit: "after slitting", bend: "after bending", flatten: "after flattening",
@@ -87,12 +68,14 @@ const GROUP_NAME: Record<PlanLeg["op"], string> = {
 export interface PlanGroup { op: PlanLeg["op"]; label: string; shape: number; name: string; legs: number[] }
 
 /** The plan's groups, in order: the abstraction the plan is built on (one
- *  subgoal each); the legs inside a group are its settings. */
+ *  subgoal each); the legs inside a group are its settings. Each cogging leg is
+ *  a group of its own (a stretch of the bar, with its dies). Mirrors the
+ *  server's /api/plan/subgoals. */
 export function subgoals(plan: PlanInfo): PlanGroup[] {
   const out: PlanGroup[] = [];
   for (const lg of plan.legs) {
     const last = out[out.length - 1];
-    if (last && last.shape === lg.end) last.legs.push(lg.index);
+    if (last && last.shape === lg.end && lg.op !== "cog") last.legs.push(lg.index);
     else out.push({ op: lg.op, label: GROUP_NAME[lg.op], shape: lg.end, name: DONE_NAME[lg.op], legs: [lg.index] });
   }
   if (out.length) out[out.length - 1].name = "the goal";
@@ -106,17 +89,16 @@ interface PlanStore {
   jobId: string | null;
   status: PlanStatus | null;
   error: string | null;
-  loading: boolean; // a program is being opened
   view: PlanView;
   loadSchema: () => Promise<void>;
   setSetting: (name: string, value: SettingValue) => void;
   start: () => Promise<void>;
   stop: () => Promise<void>;
-  open: (upto?: number) => Promise<void>;
   makeGoal: (shape: number | "goal", name: string) => Promise<void>;
   // The plan in the graph: a group's subgoal as a Subgoal node (`groups`), or
-  // (`chain`) a stock and a Controller node per group, each aimed at its
-  // subgoal's node -- the plan as a chain of controllers, each editable.
+  // (`chain`) a stock and a controller node per group (its operation's kind),
+  // each with its subgoal's node in its goal input -- the plan as a chain of
+  // controllers, each editable; the graph cooks it (runs it forward) at once.
   toGraph: (opts: { groups?: number[]; chain?: boolean }) => Promise<void>;
   setView: (v: PlanView) => void;
 }
@@ -124,7 +106,7 @@ interface PlanStore {
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 // Polls the job's status until it ends; the first plan it sees is shown (the
-// straight preform), and a finished run shows its last group.
+// straight preform).
 function poll(get: () => PlanStore, set: (p: Partial<PlanStore>) => void) {
   if (pollTimer) clearInterval(pollTimer);
   let misses = 0;
@@ -142,8 +124,6 @@ function poll(get: () => PlanStore, set: (p: Partial<PlanStore>) => void) {
       if (TERMINAL.includes(st.state) && pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
-        const legs = st.plan?.legs.length ?? 0;
-        if (st.state === "done" && st.run && legs) set({ view: { leg: legs - 1 } });
       }
     } catch (e) {
       if (++misses >= 10) set({ error: `no status from the server for ${misses} s (${String(e)})` });
@@ -158,7 +138,6 @@ export const usePlanStore = create<PlanStore>((set, get) => ({
   jobId: null,
   status: null,
   error: null,
-  loading: false,
   view: null,
 
   loadSchema: async () => {
@@ -205,25 +184,6 @@ export const usePlanStore = create<PlanStore>((set, get) => ({
     await fetch("/api/plan/stop", { method: "POST" });
   },
 
-  open: async (upto) => {
-    set({ loading: true, error: null });
-    try {
-      const res = await fetch("/api/plan/open", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: get().jobId, upto: upto ?? null }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      usePipelineStore.getState().loadPath(data.path as PathJson, { append: useSearchStore.getState().openMode === "add" });
-      set({ view: null }); // back to the graph's view: the opened program cooks there
-    } catch (e) {
-      set({ error: `could not open the program: ${String(e)}` });
-    } finally {
-      set({ loading: false });
-    }
-  },
-
   makeGoal: async (shape, name) => {
     const res = await fetch("/api/plan/goal", {
       method: "POST",
@@ -256,24 +216,30 @@ export const usePlanStore = create<PlanStore>((set, get) => ({
       toast({ text: `Couldn't add the plan to the graph: ${data.error ?? `HTTP ${res.status}`}`, tone: "error" });
       return;
     }
-    const subs: { id: string; name: string; op: string }[] = data.subgoals;
+    const subs: { id: string; name: string; op: string; kind: string; settings?: Record<string, unknown> }[] = data.subgoals;
     const nodes: { id: string; kind: string; params: Record<string, unknown> }[] = subs.map((sg, i) => ({
       id: `g${i}`, kind: "plan_subgoal", params: { subgoal: sg.id, label: sg.name },
     }));
-    const edges: { source: string; target: string }[] = [];
+    const edges: { source: string; target: string; target_input: string }[] = [];
     if (chain) {
       nodes.unshift({ id: "s", kind: "ops_stock", params: data.stock });
       subs.forEach((sg, i) => {
-        nodes.push({ id: `c${i}`, kind: "ops_controller", params: { goal: `g${i}`, label: `${sg.op} → ${sg.name.split(": ").pop()}` } });
-        edges.push({ source: i === 0 ? "s" : `c${i - 1}`, target: `c${i}` });
+        const cogs = subs.filter((x) => x.op === "cog");
+        const which = sg.op === "cog" && cogs.length > 1 ? ` ${cogs.indexOf(sg) + 1}` : "";
+        nodes.push({ id: `c${i}`, kind: sg.kind,
+                     params: { ...(sg.settings ?? {}), label: `${sg.op}${which} → ${sg.name.split(": ").pop()}` } });
+        edges.push({ source: i === 0 ? "s" : `c${i - 1}`, target: `c${i}`, target_input: "state" });
+        edges.push({ source: `g${i}`, target: `c${i}`, target_input: "goal" });
       });
     }
     const pipeline = usePipelineStore.getState();
-    // a chain opens as the Search tab's results do (replacing the graph, or beside it); a lone subgoal goes beside
+    // a chain opens as the Search tab's results do (replacing the graph, or beside it); a lone subgoal goes beside.
+    // Either way the graph cooks: the chain runs forward, controller by controller.
     pipeline.importGraph({ nodes, edges } as unknown as GraphJson,
                          { append: !chain || useSearchStore.getState().openMode === "add" });
     set({ view: null });
-    toast({ text: chain ? `The plan as ${subs.length} controllers, each aimed at its subgoal` : `Added: ${subs.map((s) => s.name).join(", ")}`,
+    toast({ text: chain ? `The plan as ${subs.length} controllers, each aimed at its subgoal: cooking`
+                        : `Added: ${subs.map((s) => s.name).join(", ")}`,
             tone: "success" });
   },
 }));
@@ -290,26 +256,9 @@ export function planViewMeshes(status: PlanStatus | null, view: PlanView):
   { main: string; mainIsMade: boolean; subgoal: string | null; goal: string; caption: string } | null {
   const plan = status?.plan;
   if (!plan || view === null) return null;
-  if ("shape" in view) {
-    const sg = subgoals(plan).find((g) => g.shape === view.shape) ?? { shape: view.shape, name: plan.shapes[view.shape]?.name };
-    const shape = plan.shapes[view.shape];
-    if (!shape) return null;
-    return { main: shape.tag, mainIsMade: false, subgoal: null, goal: plan.goal_tag,
-             caption: `Subgoal: ${sg.name} (amber) · the goal (green)` };
-  }
-  const leg = plan.legs[view.leg];
-  if (!leg) return null;
-  const made = status?.run?.legs[view.leg];
-  const sub = plan.shapes[leg.end];
-  const group = subgoals(plan).find((g) => g.legs.includes(view.leg));
-  const subName = group?.name ?? sub?.name;
-  const whole = !group || group.legs[group.legs.length - 1] === view.leg; // the group's end
-  const title = whole && group && group.legs.length > 1 ? `${group.label} (${group.legs.length} legs)`
-    : `${leg.label}${leg.chain_name !== "root" ? `, ${leg.chain_name}` : ""}`;
-  return made
-    ? { main: made.made_tag, mainIsMade: true, subgoal: sub?.tag ?? null, goal: plan.goal_tag,
-        caption: `${title}: the part made vs its subgoal, ${subName} (amber)` +
-                 (whole ? "" : " — the group's later legs aren't in it yet") }
-    : { main: sub.tag, mainIsMade: false, subgoal: null, goal: plan.goal_tag,
-        caption: `${title} should make: ${subName} (amber) · not run yet` };
+  const sg = subgoals(plan).find((g) => g.shape === view.shape) ?? { shape: view.shape, name: plan.shapes[view.shape]?.name };
+  const shape = plan.shapes[view.shape];
+  if (!shape) return null;
+  return { main: shape.tag, mainIsMade: false, subgoal: null, goal: plan.goal_tag,
+           caption: `Subgoal: ${sg.name} (amber) · the goal (green)` };
 }

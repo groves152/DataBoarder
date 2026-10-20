@@ -9,9 +9,9 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
-from databoarder.pipeline.graph import Graph
+from databoarder.pipeline.graph import Graph, GraphEdge
 from databoarder.pipeline.registry import PipelineRegistry
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,36 @@ class CookResult:
     # later cook reuses a node whose signature is unchanged (`cook(prev=...)`).
     signatures: dict[str, str] = field(default_factory=dict)
     reused: int = 0  # how many nodes this cook took from the previous one
+    # Each frozen node that kept its held value: whether what's upstream of it
+    # has changed since it was frozen ("stale": it would cook differently now).
+    frozen: dict[str, dict[str, bool]] = field(default_factory=dict)
+
+
+@dataclass
+class Frozen:
+    """A frozen node's held result: what it cooked to when it was frozen."""
+
+    signature: str
+    value: Any
+    diagnostics: "dict[str, Any] | None" = None
+    mesh: Any = None
+
+
+def primary_edge(graph: Graph, registry: PipelineRegistry) -> Callable[[GraphEdge], bool]:
+    """Whether an edge feeds its target's FIRST input (its state: the program
+    goes on through it) -- not a side input (a controller's goal)."""
+    kinds = {n.id: n.kind for n in graph.nodes}
+
+    def primary(e: GraphEdge) -> bool:
+        spec = registry.get(kinds.get(e.target, ""))
+        return e.target_input == (spec.inputs[0] if spec is not None and spec.inputs else "state")
+
+    return primary
+
+
+def programs(graph: Graph, registry: PipelineRegistry) -> list[list[str]]:
+    """The graph's programs, joined through first inputs only (`primary_edge`)."""
+    return graph.programs(primary_edge(graph, registry))
 
 
 def ref_params(spec) -> list[str]:
@@ -89,13 +119,16 @@ def _signature(kind: str, params: dict[str, Any], inputs: dict[str, str]) -> str
 
 
 def cook(graph: Graph, registry: PipelineRegistry, context: dict[str, Any] | None = None,
-         mesh_nodes: "set[str] | None" = None, prev: "CookResult | None" = None) -> CookResult:
+         mesh_nodes: "set[str] | None" = None, prev: "CookResult | None" = None,
+         frozen: "dict[str, Frozen] | None" = None) -> CookResult:
     """Every node's value and diagnostics; `to_mesh` for `mesh_nodes` only
     (None: all) -- a long program's meshes are made as they're shown.
     `prev`: the last cook of this graph -- a node whose signature (kind,
     params, upstream) is unchanged keeps its value (and its mesh, and its
     diagnostics if the context is the same), so an edit near the end of a
-    long program recomputes only from the edit on. Handlers must be pure."""
+    long program recomputes only from the edit on. Handlers must be pure.
+    `frozen`: held results by node id -- a node marked frozen that has one
+    keeps it (and its signature, so nothing after it re-cooks either)."""
     order = graph.topological_order(extra=ref_edges(graph, registry))
     nodes_by_id = {n.id: n for n in graph.nodes}
     incoming_edges: dict[str, list] = {n.id: [] for n in graph.nodes}
@@ -125,7 +158,7 @@ def cook(graph: Graph, registry: PipelineRegistry, context: dict[str, Any] | Non
             # topological_order guarantees e.source was cooked already
             inputs[e.target_input] = result.values[e.source]
 
-        missing = [name for name in spec.inputs if name not in inputs]
+        missing = [name for name in spec.inputs if name not in inputs and name not in spec.optional]
         if missing:
             raise ValueError(
                 f"node {node_id!r} ({node.kind}) missing required input(s): {missing}"
@@ -135,8 +168,13 @@ def cook(graph: Graph, registry: PipelineRegistry, context: dict[str, Any] | Non
         sig = _signature(node.kind, node.params,
                          {**{e.target_input: result.signatures[e.source] for e in incoming_edges[node_id]}, **refs})
         result.signatures[node_id] = sig
-        same = prev is not None and prev.signatures.get(node_id) == sig and node_id in prev.values
-        if same:
+        held = (frozen or {}).get(node_id) if node.frozen else None
+        same = held is None and prev is not None and prev.signatures.get(node_id) == sig and node_id in prev.values
+        if held is not None:  # frozen: its held value, and its signature then (nothing after it re-cooks)
+            result.values[node_id] = held.value
+            result.signatures[node_id] = held.signature
+            result.frozen[node_id] = {"stale": held.signature != sig}
+        elif same:
             result.values[node_id] = prev.values[node_id]
             result.reused += 1
         else:
@@ -145,12 +183,18 @@ def cook(graph: Graph, registry: PipelineRegistry, context: dict[str, Any] | Non
             root_value = result.values[node_id]
 
         if spec.to_mesh is not None and (mesh_nodes is None or node_id in mesh_nodes):
-            result.meshes[node_id] = (prev.meshes[node_id] if same and node_id in prev.meshes
-                                      else spec.to_mesh(result.values[node_id]))
+            if held is not None and held.mesh is not None:
+                result.meshes[node_id] = held.mesh
+            elif same and node_id in prev.meshes:
+                result.meshes[node_id] = prev.meshes[node_id]
+            else:
+                result.meshes[node_id] = spec.to_mesh(result.values[node_id])
 
         # diagnostics read the context (e.g. a goal) and the root: reused only if neither changed
         root_same = prev is not None and root_id is not None and prev.signatures.get(root_id) == result.signatures.get(root_id)
-        if same and root_same and prev.context == context and node_id in prev.diagnostics:
+        if held is not None and held.diagnostics is not None:
+            result.diagnostics[node_id] = held.diagnostics
+        elif same and root_same and prev.context == context and node_id in prev.diagnostics:
             result.diagnostics[node_id] = prev.diagnostics[node_id]
         elif spec.diagnostics is not None:
             # Diagnostics are explicitly optional extra info (see

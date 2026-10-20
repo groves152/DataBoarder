@@ -72,7 +72,7 @@ function MenuItem({ onClick, disabled, title, children }: {
 
 export function PathMenu() {
   const {
-    generatorSchemas, fetchGeneratorSchemas, transformSchemas, fetchTransformSchemas, loadPath, exportPath, importGraph, exportGraph, tag, nodes,
+    generatorSchemas, fetchGeneratorSchemas, transformSchemas, fetchTransformSchemas, loadPath, exportProgram, importGraph, exportGraph, tag, nodes,
     diagnostics, goalName,
   } = usePipelineStore();
   const { programs, current } = useCurrentProgram();
@@ -135,11 +135,12 @@ export function PathMenu() {
     }
   }
 
-  function handleExportPathClick() {
-    const path = exportPath();
+  // the current program as a path; a controller in it is baked into the steps it chose
+  async function handleExportPathClick() {
+    setOpen(false);
+    const { path, error } = await exportProgram();
     if (!path) {
-      setExportError("Current graph isn't a simple linear chain (no branches/merges) — can't export as a path.");
-      setOpen(false);
+      setExportError(error ?? "Can't export the program as a path.");
       return;
     }
     setExportError(null);
@@ -179,7 +180,7 @@ export function PathMenu() {
             <MenuItem onClick={handlePasteClick}>Paste JSON…</MenuItem>
           </Submenu>
           <Submenu id="export" label="Export" openId={sub} setOpenId={setSub}>
-            <MenuItem onClick={handleExportPathClick} title="Only works if the graph is a single linear chain, no branches">
+            <MenuItem onClick={handleExportPathClick} title="The current program as a path (a linear chain): each controller baked into the steps it chose, from its last cook">
               As path (JSON)
             </MenuItem>
             <MenuItem onClick={() => handleExportGraphClick(false)}>Whole graph (JSON)</MenuItem>

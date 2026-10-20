@@ -1,5 +1,6 @@
 // Programs: the graph's connected components (a stock and the steps that
-// follow it). Mirrors `databoarder/pipeline/graph.py::Graph.programs`, so a
+// follow it), joined through first inputs (callers pass `primaryEdges`).
+// Mirrors `databoarder/pipeline/graph.py::Graph.programs`, so a
 // program's root (its first node in topological order) names the same
 // sequence tag the server pushes for it.
 import { topologicalOrder } from "./graphOrder";
@@ -9,6 +10,17 @@ export interface Program {
   nodeIds: string[]; // topological order
 }
 
+/** The edges that carry a program on: into a node's FIRST input (its state),
+ *  not a side input (a controller's goal) -- `databoarder.pipeline.cook.primary_edge`. */
+export function primaryEdges<E extends { target: string; targetHandle?: string | null }>(
+  nodes: { id: string; data: { kind: string } }[], edges: E[], kinds: { kind: string; inputs: string[] }[],
+): E[] {
+  const first = new Map(kinds.map((k) => [k.kind, k.inputs[0] ?? "state"]));
+  const kindOf = new Map(nodes.map((n) => [n.id, n.data.kind]));
+  return edges.filter((e) => !e.targetHandle || e.targetHandle === (first.get(kindOf.get(e.target) ?? "") ?? "state"));
+}
+
+/** Programs, joined through first inputs only (see primaryEdges). */
 export function programsOf(nodes: { id: string }[], edges: { source: string; target: string }[]): Program[] {
   const order = topologicalOrder(nodes, edges);
   if (!order) return [];

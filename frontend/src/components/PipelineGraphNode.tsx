@@ -1,5 +1,5 @@
 import { Handle, Position, type NodeProps, type Node } from "@xyflow/react";
-import type { PipelineNodeData } from "@/types/pipeline";
+import type { NodeBadge, PipelineNodeData } from "@/types/pipeline";
 import { usePipelineStore } from "@/stores/pipelineStore";
 import { formatRadiansAsPi } from "@/utils/angleFormat";
 
@@ -7,6 +7,16 @@ type PipelineNodeType = Node<PipelineNodeData>;
 
 const handleClass =
   "!bg-accent !border-2 !border-surface !w-4 !h-4 hover:!scale-125 transition-transform";
+// a side input that may be left unconnected (a controller's goal): hollow
+const optionalHandleClass =
+  "!bg-surface !border-2 !border-amber-400 !w-4 !h-4 hover:!scale-125 transition-transform";
+
+const BADGE_TONE: Record<string, string> = {
+  ok: "text-green-300 border-green-500/50 bg-green-500/10",
+  bad: "text-red-300 border-red-500/60 bg-red-500/10",
+  warn: "text-amber-300 border-amber-500/60 bg-amber-500/10",
+  info: "text-sky-300 border-sky-500/50 bg-sky-500/10",
+};
 
 function formatParamValue(name: string, value: unknown): string {
   if (name === "phi" && typeof value === "number") return formatRadiansAsPi(value);
@@ -49,6 +59,14 @@ export function PipelineGraphNode({ id, data, selected }: NodeProps<PipelineNode
   const label = typeof data.params.label === "string" && data.params.label ? data.params.label : null;
   const expandedNodes = usePipelineStore((s) => s.expandedNodes);
   const connectNearestTarget = usePipelineStore((s) => s.connectNearestTarget);
+  // Several inputs (a controller: its state, and its goal): a labelled handle each.
+  const schema = usePipelineStore((s) => s.nodeKinds.find((k) => k.kind === data.kind));
+  const inputs = schema?.inputs ?? [];
+  // (a string: a new Set per store change would re-render every node)
+  const connected = usePipelineStore((s) => s.edges.filter((e) => e.target === id).map((e) => e.targetHandle || "state").join(","))
+    .split(",");
+  const badges = usePipelineStore((s) => s.diagnostics[id]?.badges) as NodeBadge[] | undefined;
+  const frozenStale = usePipelineStore((s) => s.frozenStale[id]);
 
   return (
     <div
@@ -56,15 +74,48 @@ export function PipelineGraphNode({ id, data, selected }: NodeProps<PipelineNode
         selected ? "border-accent" : "border-border"
       }`}
     >
-      <Handle type="target" position={Position.Left} className={handleClass} title="Drag from an upstream node's output dot here" />
-      <div className="flex items-center gap-1.5">
+      {inputs.length <= 1 ? (
+        <Handle type="target" position={Position.Left} className={handleClass} title="Drag from an upstream node's output dot here" />
+      ) : inputs.map((name, i) => {
+        const optional = schema?.optional?.includes(name);
+        const top = `${((i + 1) / (inputs.length + 1)) * 100}%`;
+        return (
+          <div key={name}>
+            <Handle type="target" id={name} position={Position.Left} style={{ top }}
+                    className={optional && !connected.includes(name) ? optionalHandleClass : handleClass}
+                    title={i === 0 ? `${name}: the part before it (drag an upstream node's output here)`
+                      : `${name}${optional ? " (optional)" : ""}: drag the node it aims at here`} />
+            <span className="absolute left-2.5 -translate-y-1/2 text-[9px] text-gray-500 pointer-events-none" style={{ top }}>
+              {name}
+            </span>
+          </div>
+        );
+      })}
+      <div className={`flex items-center gap-1.5 ${inputs.length > 1 ? "pl-7 min-h-[30px]" : ""}`}>
         <span
           className={`w-1.5 h-1.5 rounded-full shrink-0 ${data.cooked ? "bg-green-400" : "bg-gray-500"}`}
           title={data.cooked ? "cooked" : "stale — needs cook"}
         />
         <span className="text-xs font-semibold text-gray-200">{label ?? data.kind}</span>
+        {data.frozen && (
+          <span className={`text-[10px] ${frozenStale ? "text-amber-400" : "text-sky-300"}`}
+                title={frozenStale ? "Frozen, and what's before it has changed since: unfreeze to re-run it"
+                  : "Frozen: keeps its result whatever changes before it"}>
+            ❄{frozenStale ? " stale" : ""}
+          </span>
+        )}
       </div>
-      {label && <div className="text-[10px] text-gray-500 pl-3">{data.kind}</div>}
+      {label && <div className={`text-[10px] text-gray-500 ${inputs.length > 1 ? "pl-10" : "pl-3"}`}>{data.kind}</div>}
+      {badges && badges.length > 0 && (
+        <div className={`flex flex-wrap gap-1 mt-1 ${inputs.length > 1 ? "pl-7" : "pl-3"}`}>
+          {badges.map((b) => (
+            <span key={b.text} title={b.title}
+                  className={`px-1 rounded border text-[10px] tabular-nums ${BADGE_TONE[b.tone ?? ""] ?? "text-gray-300 border-border"}`}>
+              {b.text}
+            </span>
+          ))}
+        </div>
+      )}
       {requiredLoad !== null && (
         <div className="text-[10px] text-warn pl-3 tabular-nums" title="Estimated press load this step needs">
           needs {(requiredLoad / 1000).toFixed(0)} kN

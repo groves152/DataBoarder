@@ -5,7 +5,7 @@ sends to `POST /api/pipeline/{tag}/cook`."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass
@@ -13,6 +13,9 @@ class GraphNode:
     id: str
     kind: str
     params: dict[str, Any] = field(default_factory=dict)
+    # Frozen: keeps the value it had when frozen, whatever changes upstream
+    # (an expensive node -- a controller -- not re-run on every edit before it).
+    frozen: bool = False
 
 
 @dataclass
@@ -29,13 +32,15 @@ class Graph:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "Graph":
-        nodes = [GraphNode(**n) for n in data.get("nodes", [])]
+        nodes = [GraphNode(id=n["id"], kind=n["kind"], params=n.get("params") or {}, frozen=bool(n.get("frozen")))
+                 for n in data.get("nodes", [])]
         edges = [GraphEdge(**e) for e in data.get("edges", [])]
         return cls(nodes=nodes, edges=edges)
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "nodes": [{"id": n.id, "kind": n.kind, "params": n.params} for n in self.nodes],
+            "nodes": [{"id": n.id, "kind": n.kind, "params": n.params, **({"frozen": True} if n.frozen else {})}
+                      for n in self.nodes],
             "edges": [
                 {"source": e.source, "target": e.target, "target_input": e.target_input}
                 for e in self.edges
@@ -76,10 +81,12 @@ class Graph:
             raise ValueError("cycle detected in pipeline graph")
         return order
 
-    def programs(self) -> list[list[str]]:
+    def programs(self, primary: "Callable[[GraphEdge], bool] | None" = None) -> list[list[str]]:
         """The connected components ("programs": a stock and the steps that
         follow it), each in topological order, ordered by where each starts
-        in the whole graph's topological order."""
+        in the whole graph's topological order. `primary(edge)`: whether an
+        edge carries the program on (a node's first input -- its state); other
+        edges (a controller's goal) don't join their source to the program."""
         order = self.topological_order()
         parent = {nid: nid for nid in order}
 
@@ -90,7 +97,8 @@ class Graph:
             return a
 
         for e in self.edges:
-            parent[find(e.source)] = find(e.target)
+            if primary is None or primary(e):
+                parent[find(e.source)] = find(e.target)
         groups: dict[str, list[str]] = {}
         for nid in order:
             groups.setdefault(find(nid), []).append(nid)

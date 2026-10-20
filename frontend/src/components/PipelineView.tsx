@@ -41,6 +41,7 @@ export function PipelineView() {
     goalName, goalVisible, goalOpacity, billetOpacity,
     meshField, fieldRangeLocked, fieldMin, fieldMax, showTools, setAvailableFields, pinnedPrograms, viewGrid,
     goalPreview, goalEditing, subframes, setSubframes, cookEpoch, ensureMeshes, ensureReplay, replayBuilding,
+    actionView, nodeActions, showAction,
   } = usePipelineStore();
   const grid = viewGrid.on ? viewGrid : null;
   // A goal being edited shows as its preview, in the goal's place
@@ -320,8 +321,10 @@ export function PipelineView() {
                       </div>
                     );
                   }
+                  // a controller's action picked in the inspector: the part after it
+                  const action = !viewSequence && actionView && actionView.node === selectedNodeId ? actionView : null;
                   const meshTag = viewSequence ? sequenceTag(tag, programs, current)
-                    : selectedNodeId ? `${tag}/${selectedNodeId}` : null;
+                    : action ? action.tag : selectedNodeId ? `${tag}/${selectedNodeId}` : null;
                   if (!meshTag && goalTag && goalVisible) {
                     // Nothing selected (or an empty graph): show the goal on its own.
                     return (
@@ -354,7 +357,7 @@ export function PipelineView() {
                   // (each node has only ONE current mesh, no history, so a
                   // fresh mount per click is correct there, not the thing
                   // that was flashing).
-                  return (
+                  const panel = (
                     <MeshPanel
                       key={`${run}::${meshTag}`}
                       run={run}
@@ -368,9 +371,26 @@ export function PipelineView() {
                       onFieldsSeen={setAvailableFields}
                       showTools={showTools}
                       transport={viewSequence}
-                      exportName={currentLabel}
+                      exportName={action ? `${currentLabel}_action${action.index + 1}` : currentLabel}
                       grid={grid}
                     />
+                  );
+                  if (!action) return panel;
+                  const acts = nodeActions[action.node];
+                  const act = Array.isArray(acts) ? acts[action.index] : undefined;
+                  return (
+                    <div className="relative h-full w-full">
+                      {panel}
+                      <div className="absolute top-2 left-2 z-10 max-w-[70%] flex items-start gap-2 bg-panel/85 border border-border rounded px-2 py-1 text-[10px] text-gray-300">
+                        <span>
+                          <span className="text-gray-500 uppercase tracking-wide mr-1">Action</span>
+                          {action.index + 1}{Array.isArray(acts) ? ` of ${acts.length}` : ""}{act ? `: ${act.label ?? act.kind}` : ""}
+                          {act?.what ? <span className="text-gray-500"> · {act.what}</span> : null}
+                        </span>
+                        <button onClick={() => void showAction(action.node, null)} title="Back to the node's result"
+                                className="text-gray-500 hover:text-gray-100">✕</button>
+                      </div>
+                    </div>
                   );
                 })()}
                 </div>

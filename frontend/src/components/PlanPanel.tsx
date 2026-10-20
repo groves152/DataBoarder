@@ -1,18 +1,16 @@
 import { useEffect, useState } from "react";
 import { usePipelineStore } from "@/stores/pipelineStore";
-import { type PlanLeg, type Surface, subgoals, usePlanStore } from "@/stores/planStore";
+import { type PlanLeg, subgoals, usePlanStore } from "@/stores/planStore";
 import { type SettingValue, TERMINAL, useSearchStore } from "@/stores/searchStore";
 import { FieldInput, Section, smallBtn } from "./SearchPanel";
-import { ScalarPanel } from "./ScalarPanel";
 
 // The side panel's "Plan" tab: the goal mesh decomposed into groups of
 // operations -- cog the stock to a straight preform, then slit, bend, flatten,
 // pierce -- each group with the shape it should make (its subgoal; the legs
-// inside a group are its settings), and run forward by each operation's
-// controller. Click a group (or a leg) to see, in the viewport, what the chain
-// made against that subgoal; open the chain's program into the graph to the
-// end of any group; make any subgoal a goal of its own (e.g. the straight
-// preform, for the Search tab).
+// inside a group are its settings). Click a group to see its subgoal in the
+// viewport; "Add to graph & cook" puts the plan in the graph as a chain of
+// controller nodes, each aimed at its subgoal's node, and cooks it (runs it
+// forward); make any subgoal a goal of its own (e.g. the straight preform).
 
 const OP_TONE: Record<PlanLeg["op"], string> = {
   cog: "text-gray-300 border-gray-500/60",
@@ -22,36 +20,23 @@ const OP_TONE: Record<PlanLeg["op"], string> = {
   pierce: "text-violet-300 border-violet-400/60",
 };
 
-const mm = (v: number) => `${v.toFixed(2)} mm`;
+const STOCK_SOURCE: Record<string, string> = { standard: "the standard bar", graph: "the graph's", preform: "sized to the preform" };
 const dims = (s: { radius: number; length: number }) => `D${(2 * s.radius).toFixed(1).replace(/\.0$/, "")} × ${s.length.toFixed(1).replace(/\.0$/, "")} mm`;
 const slug = (s: string) => s.replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
 
-function SurfaceRows({ s }: { s: Surface }) {
-  return (
-    <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 tabular-nums">
-      <span className="text-gray-500" title="Each point of the made part's surface: its distance to the goal's">made → goal</span>
-      <span className="text-gray-200">{mm(s.made_to_goal_mean)} mean · {mm(s.made_to_goal_p95)} p95</span>
-      <span className="text-gray-500" title="Each point of the goal's surface: its distance to the made part's (catches what's missing)">goal → made</span>
-      <span className="text-gray-200">{mm(s.goal_to_made_mean)} mean · {mm(s.goal_to_made_p95)} p95</span>
-    </div>
-  );
-}
-
 export function PlanPanel() {
   const goalName = usePipelineStore((s) => s.goalName);
-  const { fields, settings, status, error, loading, view, loadSchema, setSetting, start, stop, open, makeGoal, setView,
+  const { fields, settings, status, error, view, loadSchema, setSetting, start, stop, makeGoal, setView,
           toGraph } = usePlanStore();
+  const cooking = usePipelineStore((s) => s.cooking);
   const openMode = useSearchStore((s) => s.openMode);
   const setOpenMode = useSearchStore((s) => s.setOpenMode);
-  const runId = usePlanStore((s) => s.run);
   useEffect(() => void loadSchema(), [loadSchema]);
   const [naming, setNaming] = useState<{ shape: number | "goal"; name: string } | null>(null);
   const running = !!status && !TERMINAL.includes(status.state);
   const plan = status?.plan;
-  const run = status?.run;
   const groups = plan ? subgoals(plan) : [];
-  const viewing = (v: { leg: number } | { shape: number }) =>
-    view !== null && ("leg" in v ? "leg" in view && view.leg === v.leg : "shape" in view && view.shape === v.shape);
+  const viewing = (shape: number) => view !== null && view.shape === shape;
 
   if (!fields) {
     return <div className="p-3 text-xs text-gray-500">No planner: the server doesn't have forge-control installed.</div>;
@@ -75,14 +60,14 @@ export function PlanPanel() {
         <div className="mt-1 text-[10px] text-gray-500">
           Finds the operations in the goal (bends, flats, holes, a slit), undoes them back to a straight preform, and
           plans the legs that make it: cog the stock to the preform, then each operation, each with the shape it should
-          make. Then runs them forward.
+          make. Add it to the graph to run it: a controller node per group, aimed at its subgoal.
         </div>
         {error && <div className="mt-1.5 text-red-400 break-words">{error}</div>}
         {status && (
           <div className="mt-1.5 flex flex-col gap-0.5 tabular-nums">
             <div>
               <span className="text-gray-100">{status.state}</span>
-              {status.iterations > 0 && <span className="text-gray-500"> · leg {Math.min(status.iteration + 1, status.iterations)}/{status.iterations}</span>}
+              {plan && <span className="text-gray-500"> · {plan.legs.length} legs in {groups.length} groups</span>}
               <span className="text-gray-500"> · {status.goal}</span>
             </div>
             {status.phase && running && <div className="text-gray-500">{status.phase}</div>}
@@ -91,18 +76,17 @@ export function PlanPanel() {
         )}
       </Section>
 
-      {status?.tag && (running || typeof status.best_loss === "number") && (
-        <div className="h-32 shrink-0 border-b border-border" title="The cogging leg's misfit to the straight preform, per cycle">
-          <ScalarPanel run={runId} tag={status.tag} shortNames />
-        </div>
-      )}
-
       {plan && (
         <Section title={`Plan for ${status?.goal}`}>
           <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
             <span className="text-gray-500">stock</span>
             <span className="text-gray-200 tabular-nums">
-              {dims(plan.stock)} <span className="text-gray-500">— {plan.stock.source === "graph" ? "the graph's" : "suggested"}, {plan.stock.why}</span>
+              {dims(plan.stock)} <span className="text-gray-500">— {STOCK_SOURCE[plan.stock.source] ?? plan.stock.source}: {plan.stock.why}</span>
+              {plan.stock.workable_mm > plan.stock.max_workable_mm && (
+                <span className="block text-amber-400">
+                  ⚠ needs {plan.stock.workable_mm.toFixed(1)} mm past the held end: over the {plan.stock.max_workable_mm} mm a part may use
+                </span>
+              )}
             </span>
             {plan.stock.source === "graph" && (
               <>
@@ -139,24 +123,19 @@ export function PlanPanel() {
         </Section>
       )}
 
-      {run && (
-        <Section title={run.complete ? "Result" : "Result (stopped early)"} right={
-          <>
-            <button onClick={() => void toGraph({ chain: true })} disabled={running} className={smallBtn}
-                    title="A stock and a Controller node per group, each aimed at its Subgoal node: the plan as a chain of controllers you can edit and re-run">
-              Controllers → graph
+      {plan && (
+        <Section title="Into the graph">
+          <div className="flex items-center gap-2">
+            <button onClick={() => void toGraph({ chain: true })} disabled={running || cooking}
+                    className="px-3 py-1 rounded bg-accent text-white text-xs disabled:opacity-40"
+                    title="A stock and a controller node per group (cog, bend, flatten, ...), each with its Subgoal node in its goal input, then cooked: the plan run forward. Each controller's settings are on its node.">
+              ▶ Add to graph &amp; cook
             </button>
-            <button onClick={() => open()} disabled={loading || running} className={smallBtn}
-                    title="The whole program (reheats filled in) into the graph">
-              Open program
-            </button>
-          </>
-        }>
-          {run.surface && <SurfaceRows s={run.surface} />}
-          <div className="mt-0.5 text-gray-500 tabular-nums">{run.hits} hits · {run.steps} steps before reheats</div>
+            {cooking && <span className="text-gray-500">cooking…</span>}
+          </div>
           <div className="flex items-center gap-1 mt-1.5 text-[10px]"
-               title="Replace: the opened program becomes the graph. Add: it goes beside what's there, as its own chain (to compare).">
-            <span className="text-gray-500 mr-1">Programs open</span>
+               title="Replace: the chain becomes the graph. Add: it goes beside what's there, as its own program (to compare).">
+            <span className="text-gray-500 mr-1">The chain goes</span>
             {(["replace", "add"] as const).map((m) => (
               <button key={m} onClick={() => setOpenMode(m)}
                       className={`px-1.5 py-0.5 rounded border transition-colors ${
@@ -165,7 +144,10 @@ export function PlanPanel() {
               </button>
             ))}
           </div>
-          {loading && <div className="text-gray-500 mt-1">opening the program (filling reheats)…</div>}
+          <div className="mt-1 text-[10px] text-gray-500">
+            Each controller's badges show its hits and how close it gets to its subgoal; select one to see its steps.
+            Export the path to get the whole program as plain steps (Transform → fill heats adds the reheats).
+          </div>
         </Section>
       )}
 
@@ -175,14 +157,8 @@ export function PlanPanel() {
         ) : undefined}>
           <div className="flex flex-col gap-1">
             {groups.map((g, gi) => {
-              const last = g.legs[g.legs.length - 1];
-              const runs = g.legs.map((i) => run?.legs[i]).filter((r) => r !== undefined);
-              const done = runs.length === g.legs.length;
-              const vs = done ? run?.legs[last]?.vs_subgoal : null;
-              const hits = runs.reduce((a, r) => a + r.hits, 0);
-              const secs = runs.reduce((a, r) => a + r.seconds, 0);
-              const groupOn = g.legs.some((i) => viewing({ leg: i })) || viewing({ shape: g.shape });
-              const show = () => setView(done ? { leg: last } : { shape: g.shape });
+              const groupOn = viewing(g.shape);
+              const show = () => setView({ shape: g.shape });
               const single = g.legs.length === 1 ? plan.legs[g.legs[0]] : null;
               return (
                 <div key={g.shape} role="button" tabIndex={0} onClick={show} onKeyDown={(e) => e.key === "Enter" && show()}
@@ -193,24 +169,10 @@ export function PlanPanel() {
                     <span className={`px-1 rounded border text-[10px] uppercase tracking-wide ${OP_TONE[g.op]}`}>{g.op}</span>
                     <span className="text-gray-100">{g.label}</span>
                     {g.legs.length > 1 && <span className="text-gray-500">{g.legs.length} legs</span>}
-                    <span className="ml-auto flex items-center gap-1.5">
-                      {vs && (
-                        <span className="tabular-nums text-gray-400"
-                              title="The part after this group against its subgoal (surface distance, mean of both ways)">
-                          ±{((vs.made_to_goal_mean + vs.goal_to_made_mean) / 2).toFixed(2)} mm
-                        </span>
-                      )}
-                      {done && (
-                        <button className={smallBtn} disabled={loading || running} title="The program up to the end of this group, into the graph"
-                                onClick={(e) => { e.stopPropagation(); void open(last); }}>
-                          Open to here
-                        </button>
-                      )}
-                    </span>
                   </div>
                   <div className="pl-5 flex items-center gap-1.5 text-[10px]">
                     <span className="text-gray-500">makes</span>
-                    <button className={`hover:text-gray-100 ${viewing({ shape: g.shape }) ? "text-gray-100" : "text-amber-300/90"}`}
+                    <button className={`hover:text-gray-100 ${viewing(g.shape) ? "text-gray-100" : "text-amber-300/90"}`}
                             title="Show this subgoal on its own" onClick={(e) => { e.stopPropagation(); setView({ shape: g.shape }); }}>
                       {g.name}
                     </button>
@@ -224,7 +186,6 @@ export function PlanPanel() {
                             onClick={(e) => { e.stopPropagation(); setNaming({ shape: g.shape, name: slug(`${status?.goal}_${g.name}`) }); }}>
                       make goal…
                     </button>
-                    {done && <span className="ml-auto text-gray-500 tabular-nums">{hits ? `${hits} hits · ` : ""}{secs.toFixed(1)} s</span>}
                   </div>
                   {naming?.shape === g.shape && (
                     <div className="pl-5 mt-1 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
@@ -236,28 +197,10 @@ export function PlanPanel() {
                   )}
                   {g.legs.map((i) => {
                     const lg = plan.legs[i];
-                    const made = run?.legs[i];
                     return (
-                      <div key={i} className={`pl-5 mt-0.5 text-[10px] flex items-start gap-1 ${
-                             viewing({ leg: i }) && !single ? "bg-surface rounded" : ""}`}>
-                        <span className="flex-1 min-w-0">
-                        <span className="text-gray-400">
-                          {single ? "" : `${lg.label}${lg.chain_name !== "root" ? `, ${lg.chain_name}` : ""}: `}
-                          {single && lg.chain_name !== "root" ? `${lg.chain_name}: ` : ""}{lg.summary}
-                        </span>
-                        {made && (
-                          <span className={`tabular-nums ${made.feasible ? "text-gray-500" : "text-amber-400"}`}>
-                            {" "}→ {made.result}{made.feasible ? "" : " (a step wasn't feasible)"}
-                          </span>
-                        )}
-                        </span>
-                        {made && !single && (
-                          <button className="shrink-0 px-1 rounded text-gray-500 hover:text-gray-100 hover:bg-surface"
-                                  title="Show the part after this leg (the group's later legs not yet in it)"
-                                  onClick={(e) => { e.stopPropagation(); setView({ leg: i }); }}>
-                            ◉
-                          </button>
-                        )}
+                      <div key={i} className="pl-5 mt-0.5 text-[10px] text-gray-400">
+                        {single ? "" : `${lg.label}${lg.chain_name !== "root" ? `, ${lg.chain_name}` : ""}: `}
+                        {single && lg.chain_name !== "root" ? `${lg.chain_name}: ` : ""}{lg.summary}
                       </div>
                     );
                   })}
@@ -287,7 +230,8 @@ export function PlanPanel() {
           ))}
         </div>
         <div className="text-[10px] text-gray-600 mt-1">
-          The goal is fitted at 300 slabs × 48 angles; the controllers are isothermal (reheats go in when a program opens).
+          The goal is fitted at 300 slabs × 48 angles. The controllers are isothermal: the reheats go in on export
+          (Transform → fill heats).
         </div>
       </Section>
     </div>

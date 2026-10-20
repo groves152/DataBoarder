@@ -10,11 +10,17 @@ register their own handlers into an instance of this at runtime.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Iterable, Literal
 
 NodeHandler = Callable[..., Any]
 MeshExporter = Callable[[Any], tuple[Any, Any]]  # value -> (vertices, faces)
 FrameMaker = Callable[[dict[str, Any], dict[str, Any], int], list[Any]]  # (inputs, params, n) -> n values
+# A node that decides its own steps as it runs (a controller): (its value, its
+# resolved params, its inputs) -> the steps it took, in order, each a dict
+# {"kind": a registered node kind, "params": {...}} -- any other keys are
+# display columns (e.g. "label") -- and the state after each of them.
+ActionLister = Callable[[Any, dict[str, Any], dict[str, Any]], list[dict[str, Any]]]
+Replayer = Callable[[Any, dict[str, Any], dict[str, Any]], Iterable[Any]]
 # Given a node's own output value, its resolved params, its resolved
 # upstream inputs (e.g. {"state": <value BEFORE this node ran>} -- needed
 # for any diagnostic that compares before/after), an opaque per-cook
@@ -60,6 +66,10 @@ class ParamSpec:
     # "optimize" toggle next to it). Purely a hint; DataBoarder runs nothing.
     optimizable: bool = False
     ref_kind: str | None = None  # for type == "node_ref": the kind of node it points at
+    advanced: bool = False  # a rarely-changed setting: the inspector folds it away
+    # A select whose options are a list the frontend keeps (e.g. "goals": the
+    # library's goal meshes), not fixed here.
+    options_source: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         d: dict[str, Any] = {"type": self.type, "default": self.default}
@@ -81,6 +91,10 @@ class ParamSpec:
             d["ref_kind"] = self.ref_kind
         if self.optimizable:
             d["optimizable"] = True
+        if self.advanced:
+            d["advanced"] = True
+        if self.options_source is not None:
+            d["options_source"] = self.options_source
         return d
 
 
@@ -91,6 +105,9 @@ class NodeSpec:
     # Names of upstream inputs this handler requires, e.g. a strike node
     # that transforms an upstream billet declares inputs=("state",).
     inputs: tuple[str, ...] = ()
+    # Those of `inputs` that may be left unconnected (the handler then gets
+    # none: its default) -- a controller not yet aimed at a goal.
+    optional: tuple[str, ...] = ()
     # Optional: converts this node kind's output value to a (vertices,
     # faces) mesh preview. `cook()` uses this to auto-push a mesh for any
     # node whose kind declares one -- kept optional since not every node
@@ -112,15 +129,26 @@ class NodeSpec:
     # `cook()` meshes them (`to_mesh`) when the cook's context asks for
     # in-between frames (`context["subframes"]`).
     frames: FrameMaker | None = None
+    # Optional: a node that is a program of its own (a controller choosing its
+    # hits as it goes). `actions(value, params, inputs)` lists the steps it
+    # took (see ActionLister); `replay(value, params, inputs)` yields the
+    # state after each, lazily. A replay of the graph shows every action as a
+    # step; its inspector lists them; an export can bake the node into them
+    # (each a node of its own: a program without this node kind).
+    actions: ActionLister | None = None
+    replay: Replayer | None = None
 
     def to_json(self) -> dict[str, Any]:
         d: dict[str, Any] = {
             "kind": self.kind,
             "inputs": list(self.inputs),
+            **({"optional": list(self.optional)} if self.optional else {}),
             "params": {name: spec.to_json() for name, spec in self.params.items()},
         }
         if self.category is not None:
             d["category"] = self.category
+        if self.actions is not None:
+            d["actions"] = True
         return d
 
 
@@ -138,10 +166,14 @@ class PipelineRegistry:
         diagnostics: Diagnostics | None = None,
         category: str | None = None,
         frames: FrameMaker | None = None,
+        actions: ActionLister | None = None,
+        replay: Replayer | None = None,
+        optional: tuple[str, ...] = (),
     ) -> None:
         self._nodes[kind] = NodeSpec(
             kind=kind, handler=handler, inputs=inputs, to_mesh=to_mesh, params=params or {},
-            diagnostics=diagnostics, category=category, frames=frames,
+            diagnostics=diagnostics, category=category, frames=frames, actions=actions, replay=replay,
+            optional=optional,
         )
 
     def get(self, kind: str) -> NodeSpec | None:

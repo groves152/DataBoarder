@@ -9,10 +9,10 @@ import {
   applyEdgeChanges,
   addEdge,
 } from "@xyflow/react";
-import { programsOf, sequenceTag } from "@/utils/programs";
+import { primaryEdges, programsOf, sequenceTag } from "@/utils/programs";
 import { useDataStore } from "@/stores/dataStore";
 import type {
-  NodeKindSchema, PipelineNodeData, CookResponse, NodeDiagnostics, ParamValue,
+  NodeKindSchema, PipelineNodeData, CookResponse, NodeDiagnostics, ParamValue, NodeAction,
   PathJson, PathNodeSpec, GeneratorSchema, GraphJson, AppSettingsSnapshot, TuningProfile,
 } from "@/types/pipeline";
 
@@ -160,7 +160,7 @@ function rootOf(nodeId: string, edges: Edge[]): string {
   let current = nodeId;
   const visited = new Set([current]);
   for (;;) {
-    const prev = edges.find((e) => e.target === current)?.source;
+    const prev = edges.find((e) => e.target === current && edgeInput(e) === DEFAULT_TARGET_INPUT)?.source;
     if (!prev || visited.has(prev)) return current;
     current = prev;
     visited.add(current);
@@ -243,6 +243,17 @@ function appSettingsUpdate(settings: AppSettingsSnapshot | undefined): Record<st
 // targets that input. Revisit if/when a multi-input node kind exists.
 const DEFAULT_TARGET_INPUT = "state";
 
+/** The input an edge feeds: its target handle's (a node with several inputs
+ *  names them), else the state. */
+const edgeInput = (e: { targetHandle?: string | null }) => e.targetHandle || DEFAULT_TARGET_INPUT;
+
+/** A graph edge into `input` of `target` (the state unless named). */
+function flowEdge(source: string, target: string, input?: string | null): Edge {
+  const side = !!input && input !== DEFAULT_TARGET_INPUT;
+  return { id: side ? `${source}->${target}:${input}` : `${source}->${target}`, source, target,
+           ...(side ? { targetHandle: input } : {}) };
+}
+
 let autoCookTimer: ReturnType<typeof setTimeout> | null = null;
 // Guards against an out-of-order network response: e.g. an auto-cook from
 // a prior param edit is still in flight when the user immediately triggers
@@ -304,6 +315,19 @@ interface PipelineStore {
   replayBuilding: boolean;
   ensureMeshes: (nodes: string[]) => Promise<void>;
   ensureReplay: (root: string) => Promise<void>;
+  // Frozen nodes (PipelineNodeData.frozen) whose upstream changed since they
+  // were frozen: they'd cook differently now (from the last cook).
+  frozenStale: Record<string, boolean>;
+  setFrozen: (id: string, frozen: boolean) => void;
+  // A node's actions (a controller's steps), fetched once per cook, and the
+  // one the viewport shows (the part after it).
+  nodeActions: Record<string, NodeAction[] | "loading">;
+  fetchActions: (id: string) => Promise<void>;
+  actionView: { node: string; index: number; tag: string } | null;
+  showAction: (node: string, index: number | null) => Promise<void>;
+  // The current program as a path: plain nodes as they are, a controller
+  // baked into its steps (server side, from the last cook).
+  exportProgram: () => Promise<{ path: PathJson | null; error?: string }>;
   // node id -> extra info from its last cook (e.g. "was a param capped").
   diagnostics: Record<string, NodeDiagnostics>;
   // Whether the viewport shows the whole cooked chain's step-indexed
@@ -616,6 +640,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   cooking: false,
   cookError: null,
   cookEpoch: 0,
+  frozenStale: {},
+  nodeActions: {},
+  actionView: null,
   meshedNodes: [],
   replay: null,
   replayBuilding: false,
@@ -1066,7 +1093,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     const { nodes, edges, nodeKinds } = get();
     const source = nodes.find((n) => n.id === sourceId);
     if (!source) return;
-    const targetsWithIncoming = new Set(edges.map((e) => e.target));
+    const targetsWithIncoming = new Set(primaryEdges(nodes, edges, nodeKinds).map((e) => e.target));
     const ancestors = ancestorsOf(sourceId, edges);
     let best: string | null = null;
     let bestDist = Infinity;
@@ -1108,12 +1135,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     if (nodes.length === 0) return;
     set({ cooking: true, cookError: null });
     const graph = {
-      nodes: nodes.map((n) => ({ id: n.id, kind: n.data.kind, params: n.data.params })),
-      edges: edges.map((e) => ({
-        source: e.source,
-        target: e.target,
-        target_input: DEFAULT_TARGET_INPUT,
-      })),
+      nodes: nodes.map((n) => ({ id: n.id, kind: n.data.kind, params: n.data.params,
+                                 ...(n.data.frozen ? { frozen: true } : {}) })),
+      edges: edges.map((e) => ({ source: e.source, target: e.target, target_input: edgeInput(e) })),
     };
     const goalName = get().goalName;
     const myRequestId = ++cookRequestId;
@@ -1145,6 +1169,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         cookEpoch: s.cookEpoch + 1,
         meshedNodes: data.meshed ?? [],
         replay: null,
+        frozenStale: Object.fromEntries(Object.entries(data.frozen ?? {}).map(([id, f]) => [id, f.stale])),
+        nodeActions: {},
+        actionView: null,
       }));
     } catch (e) {
       if (myRequestId !== cookRequestId) return;
@@ -1182,7 +1209,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       // built (not streamed: the viewer would redraw per frame): its viewer fetches it now
       const { nodes, edges } = get();
-      const programs = programsOf(nodes, edges);
+      const programs = programsOf(nodes, primaryEdges(nodes, edges, get().nodeKinds));
       const seq = sequenceTag(tag, programs, programs.find((p) => p.root === root));
       useDataStore.getState().setTagTypes(run, { [seq]: "mesh" });
       useDataStore.getState().reloadTag(run, seq);
@@ -1347,6 +1374,77 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     get().cook();
   },
 
+  setFrozen: (id, frozen) => {
+    set((s) => ({ nodes: s.nodes.map((n) => (n.id === id ? { ...n, data: { ...n.data, frozen } } : n)) }));
+    get().scheduleAutoCook(); // the server holds its result from the next cook on (or lets it go)
+  },
+
+  fetchActions: async (id) => {
+    const { run, tag, nodeActions, cookEpoch } = get();
+    if (nodeActions[id] || cookEpoch === 0) return;
+    set((s) => ({ nodeActions: { ...s.nodeActions, [id]: "loading" } }));
+    try {
+      const res = await fetch(`/api/pipeline/${encodeURIComponent(tag)}/actions`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run, node: id }),
+      });
+      const data = await res.json();
+      if (get().cookEpoch !== cookEpoch) return;
+      set((s) => ({ nodeActions: { ...s.nodeActions, [id]: res.ok && data.ok ? data.actions : [] } }));
+    } catch {
+      set((s) => ({ nodeActions: { ...s.nodeActions, [id]: [] } }));
+    }
+  },
+
+  showAction: async (node, index) => {
+    if (index === null) {
+      set({ actionView: null });
+      return;
+    }
+    const { run, tag, cookEpoch } = get();
+    const res = await fetch(`/api/pipeline/${encodeURIComponent(tag)}/action`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run, node, index }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (get().cookEpoch !== cookEpoch) return;
+    if (!res.ok || !data.ok) {
+      set({ cookError: `couldn't show action ${index + 1}: ${data.error ?? `HTTP ${res.status}`}` });
+      return;
+    }
+    useDataStore.getState().setTagTypes(run, { [data.tag]: "mesh" });
+    useDataStore.getState().reloadTag(run, data.tag);
+    set({ actionView: { node, index, tag: data.tag } });
+  },
+
+  exportProgram: async () => {
+    const { nodes, edges, nodeKinds, run, tag, selectedNodeId, pathMetadata } = get();
+    const primary = primaryEdges(nodes, edges, nodeKinds);
+    const programs = programsOf(nodes, primary);
+    const prog = (selectedNodeId && programs.find((p) => p.nodeIds.includes(selectedNodeId)))
+      || [...programs].sort((a, b) => b.nodeIds.length - a.nodeIds.length)[0];
+    if (!prog) return { path: null, error: "Graph is empty." };
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const linear = prog.nodeIds.every((id, k) => k === 0
+      || primary.filter((e) => e.target === id).map((e) => e.source).join() === prog.nodeIds[k - 1]);
+    if (!linear) return { path: null, error: "The program isn't a simple linear chain (no branches/merges) — can't export it as a path." };
+    const baked = new Set(nodeKinds.filter((k) => k.actions).map((k) => k.kind));
+    const stamp = { source: "databoarder:export", exported_at: new Date().toISOString() };
+    if (!prog.nodeIds.some((id) => baked.has(byId.get(id)!.data.kind))) {
+      const spec = (id: string): PathNodeSpec => ({ kind: byId.get(id)!.data.kind, params: { ...byId.get(id)!.data.params } });
+      return { path: { format: "databoarder_path/v1", name: tag, root: spec(prog.root), steps: prog.nodeIds.slice(1).map(spec),
+                       metadata: { ...(pathMetadata ?? {}), ...stamp }, app_settings: buildAppSettingsSnapshot(get()) } };
+    }
+    if (prog.nodeIds.some((id) => !byId.get(id)!.data.cooked)) {
+      return { path: null, error: "Cook the graph first: a controller's steps come from its last cook." };
+    }
+    const res = await fetch(`/api/pipeline/${encodeURIComponent(tag)}/bake`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ run, root: prog.root }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) return { path: null, error: `Couldn't bake the controllers' steps: ${data.error ?? `HTTP ${res.status}`}` };
+    return { path: { ...data.path, name: tag, metadata: { ...(pathMetadata ?? {}), ...data.path.metadata, ...stamp },
+                     app_settings: buildAppSettingsSnapshot(get()) } };
+  },
+
   exportPath: () => {
     const { nodes, edges, tag, pathMetadata } = get();
     const chainIds = linearChain(nodes, edges);
@@ -1387,6 +1485,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           params: fillMissingMaterialParams({ ...n.params }, n.kind, nodeKinds),
           cooked: false,
           ...(n.symmetry ? { symmetry: n.symmetry } : {}),
+          ...(n.frozen ? { frozen: true } : {}),
         },
       };
     });
@@ -1400,11 +1499,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     }
     const newEdges: Edge[] = graph.edges
       .filter((e) => idMap.has(e.source) && idMap.has(e.target))
-      .map((e) => ({
-        id: `${idMap.get(e.source)}->${idMap.get(e.target)}`,
-        source: idMap.get(e.source)!,
-        target: idMap.get(e.target)!,
-      }));
+      .map((e) => flowEdge(idMap.get(e.source)!, idMap.get(e.target)!, e.target_input));
     set(append
       ? {
           nodes: [...get().nodes.map((n) => (n.selected ? { ...n, selected: false } : n)), ...newNodes],
@@ -1441,12 +1536,13 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         id: n.id, kind: n.data.kind, params: { ...n.data.params },
         position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
         ...(n.data.symmetry ? { symmetry: n.data.symmetry } : {}),
+        ...(n.data.frozen ? { frozen: true } : {}),
       })),
       app_settings: buildAppSettingsSnapshot(get()),
       edges: edges.filter((e) => chosenIds.has(e.source) && chosenIds.has(e.target)).map((e) => ({
         source: e.source,
         target: e.target,
-        target_input: DEFAULT_TARGET_INPUT,
+        target_input: edgeInput(e),
       })),
     };
   },
@@ -1466,6 +1562,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         params: fillMissingMaterialParams({ ...n.params }, n.kind, nodeKinds),
         cooked: false,
         ...(n.symmetry ? { symmetry: n.symmetry } : {}),
+        ...(n.frozen ? { frozen: true } : {}),
       },
     }));
     reserveNodeIds(nodes.map((n) => n.id));
@@ -1473,7 +1570,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     set({
       nodes,
       edges: graph.edges.filter((e) => ids.has(e.source) && ids.has(e.target))
-        .map((e) => ({ id: `${e.source}->${e.target}`, source: e.source, target: e.target })),
+        .map((e) => flowEdge(e.source, e.target, e.target_input)),
       selectedNodeId: null,
       cookError: null,
       diagnostics: {},
@@ -1506,9 +1603,9 @@ type Snapshot = { nodes: Node<PipelineNodeData>[]; edges: Edge[]; key: string };
 
 function contentKey(nodes: Node<PipelineNodeData>[], edges: Edge[]): string {
   return JSON.stringify([
-    nodes.map((n) => [n.id, n.data.kind, n.data.params, n.data.symmetry ?? null,
+    nodes.map((n) => [n.id, n.data.kind, n.data.params, n.data.symmetry ?? null, !!n.data.frozen,
                       Math.round(n.position.x), Math.round(n.position.y)]),
-    edges.map((e) => [e.source, e.target]),
+    edges.map((e) => [e.source, e.target, edgeInput(e)]),
   ]);
 }
 
@@ -1581,7 +1678,7 @@ function scheduleAutosave() {
 export function graphSummary(graph: GraphJson): Record<string, unknown> {
   return {
     nodes: graph.nodes.length,
-    programs: programsOf(graph.nodes, graph.edges).length,
+    programs: programsOf(graph.nodes, graph.edges.filter((e) => !e.target_input || e.target_input === DEFAULT_TARGET_INPUT)).length,
     goal: graph.app_settings?.goalName ?? null,
   };
 }
